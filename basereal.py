@@ -50,22 +50,85 @@ def read_imgs(img_list):
         frames.append(frame)
     return frames
 
-def play_audio(quit_event,queue):        
+def play_audio(quit_event, queue):
+    """
+    播放音频线程函数：从队列获取音频数据并播放。
+    自动检测并选择可用的输出设备。
+    """
     import pyaudio
+    import time
+    from queue import Empty  # 正确导入 Empty 异常
+
     p = pyaudio.PyAudio()
-    stream = p.open(
-        rate=16000,
-        channels=1,
-        format=8,
-        output=True,
-        output_device_index=1,
-    )
-    stream.start_stream()
-    # while queue.qsize() <= 0:
-    #     time.sleep(0.1)
-    while not quit_event.is_set():
-        stream.write(queue.get(block=True))
-    stream.close()
+    stream = None
+    selected_device_index = None
+
+    # 1. 智能选择音频输出设备
+    try:
+        # 优先使用系统默认输出设备
+        default_device = p.get_default_output_device_info()
+        selected_device_index = default_device['index']
+        logger.info(f"使用系统默认输出设备: [{selected_device_index}] {default_device['name']}")
+    except (IOError, OSError):
+        # 如果没有默认设备，手动查找第一个可用的输出设备
+        logger.warning("无法获取默认输出设备，正在扫描可用设备...")
+        for i in range(p.get_device_count()):
+            dev_info = p.get_device_info_by_index(i)
+            if dev_info['maxOutputChannels'] > 0:  # 找到第一个输出设备
+                selected_device_index = i
+                logger.info(f"使用找到的第一个输出设备: [{i}] {dev_info['name']}")
+                break
+
+    # 2. 打开音频流
+    if selected_device_index is not None:
+        try:
+            stream = p.open(
+                rate=16000,
+                channels=1,
+                format=p.get_format_from_width(2),  # 使用更标准的格式定义
+                output=True,
+                output_device_index=selected_device_index,
+                frames_per_buffer=1024  # 添加缓冲区，提高稳定性
+            )
+            logger.info("音频流打开成功")
+        except Exception as e:
+            logger.error(f"打开音频流失败: {e}")
+            stream = None
+    else:
+        logger.error("未找到可用的音频输出设备")
+
+    # 3. 播放循环
+    if stream:
+        stream.start_stream()
+        frame_count = 0
+        while not quit_event.is_set():
+            try:
+                # 从队列获取数据，最多等待0.1秒
+                audio_data = queue.get(block=True, timeout=0.1)
+                stream.write(audio_data)
+                frame_count += 1
+                #if frame_count % 100 == 0:  # 每100帧打印一次
+                    #logger.info(f"已播放 {frame_count} 个音频帧")
+            except Empty:  # 正确使用 Empty 异常
+                continue
+            except Exception as e:
+                logger.error(f"播放音频数据时出错: {e}")
+                break
+        stream.stop_stream()
+        stream.close()
+        logger.info(f"音频播放结束，共播放 {frame_count} 帧")
+    else:
+        # 如果没有可用的音频流，则等待退出信号
+        logger.warning("音频设备不可用，将进入静默模式")
+        idle_count = 0
+        while not quit_event.is_set():
+            time.sleep(0.1)
+            idle_count += 1
+            if idle_count % 100 == 0:  # 每10秒打印一次
+                logger.info("静默模式运行中...")
+
+    p.terminate()
+    logger.info("音频播放线程已停止")
 
 class BaseReal:
     def __init__(self, opt):
