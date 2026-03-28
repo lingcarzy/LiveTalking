@@ -1,125 +1,133 @@
-###############################################################################
-#  Copyright (C) 2024 LiveTalking@lipku https://github.com/lipku/LiveTalking
-#  email: lipku@foxmail.com
-# 
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
-#  
-#       http://www.apache.org/licenses/LICENSE-2.0
-# 
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
-###############################################################################
-
-# server.py
-from flask import Flask, render_template,send_from_directory,request, jsonify
-from flask_sockets import Sockets
-import base64
+# app.py
+import asyncio
+import gc
 import json
-#import gevent
-#from gevent import pywsgi
-#from geventwebsocket.handler import WebSocketHandler
-import re
-import numpy as np
-from threading import Thread,Event
-#import multiprocessing
+import random
+import os
 import torch.multiprocessing as mp
+from typing import Dict, Optional
 
 from aiohttp import web
 import aiohttp
 import aiohttp_cors
-from aiortc import RTCPeerConnection, RTCSessionDescription,RTCIceServer,RTCConfiguration
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceServer, RTCConfiguration
 from aiortc.rtcrtpsender import RTCRtpSender
+
+# 引入新的配置模块
+from configs import AppConfig
+from core.session_manager import session_manager
+from core.render_loop import RenderLoop
+from core.muse_render import MuseRenderLoop
+from core.lip_render import LipRenderLoop
+from core.light_render import LightRenderLoop
+from core.utils import (
+    load_musetalk_model, load_musetalk_avatar, warm_up_musetalk,
+    load_wav2lip_model, load_wav2lip_avatar, warm_up_wav2lip,
+    load_ultralight_model, load_ultralight_avatar, warm_up_ultralight
+)
+from services.llm import create_llm_service
 from webrtc import HumanPlayer
-from basereal import BaseReal
-from llm import llm_response
-
-import argparse
-import random
-import shutil
-import asyncio
-import torch
-from typing import Dict
 from logger import logger
-import gc
 
+# 全局变量
+pcs = set()  # WebRTC 连接集合
+# 全局配置对象
+config: Optional[AppConfig] = None
+llm_service = None
+# 全局模型实例 (暂时保留，避免重复加载)
+model_instance = None
+avatar_instance = None
 
-app = Flask(__name__)
-#sockets = Sockets(app)
-nerfreals:Dict[int, BaseReal] = {} #sessionid:BaseReal
-opt = None
-model = None
-avatar = None
-        
+# =============================================================================
+# 辅助函数
+# =============================================================================
+async def post(url, data):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data) as response:
+                return await response.text()
+    except aiohttp.ClientError as e:
+        logger.error(f'HTTP POST Error: {e}')
+        return None
+async def run(push_url, sessionid):
+    """P2: RTCPush 模式专用启动逻辑"""
+    # 注意：这里的 session 创建逻辑与 WebRTC offer 不同
+    # 我们直接调用 SessionManager 的内部逻辑或工厂方法
+    config.session_id = sessionid
+    
+    # 简单起见，直接实例化 (或者调用 session_manager.create_session 的同步版本)
+    # 这里为了保持一致性，我们手动构建
+    if config.model.name == 'musetalk':
+         render_cls = MuseRenderLoop
+    elif config.model.name == 'wav2lip':
+         render_cls = LipRenderLoop
+    elif config.model.name == 'ultralight':
+         render_cls = LightRenderLoop
+    else: return
 
-#####webrtc###############################
-pcs = set()
+    render_loop = render_cls(config, model_instance, avatar_instance)
+    # 将其加入管理 (可选，如果需要后续控制)
+    session_manager._sessions[sessionid] = render_loop
 
-def randN(N)->int:
-    '''生成长度为 N的随机数 '''
-    min = pow(10, N - 1)
-    max = pow(10, N)
-    return random.randint(min, max - 1)
+    pc = RTCPeerConnection()
+    pcs.add(pc)
 
-def build_nerfreal(sessionid:int)->BaseReal:
-    opt.sessionid=sessionid
-    if opt.model == 'wav2lip':
-        from lipreal import LipReal
-        nerfreal = LipReal(opt,model,avatar)
-    elif opt.model == 'musetalk':
-        from musereal import MuseReal
-        nerfreal = MuseReal(opt,model,avatar)
-    # elif opt.model == 'ernerf':
-    #     from nerfreal import NeRFReal
-    #     nerfreal = NeRFReal(opt,model,avatar)
-    elif opt.model == 'ultralight':
-        from lightreal import LightReal
-        nerfreal = LightReal(opt,model,avatar)
-    return nerfreal
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        logger.info(f"Push Connection state: {pc.connectionState}")
+        if pc.connectionState in ["failed", "closed"]:
+            await pc.close()
+            pcs.discard(pc)
+            await session_manager.destroy_session(sessionid)
 
-#@app.route('/offer', methods=['POST'])
+    player = HumanPlayer(render_loop)
+    audio_sender = pc.addTrack(player.audio)
+    video_sender = pc.addTrack(player.video)
+
+    await pc.setLocalDescription(await pc.createOffer())
+    answer = await post(push_url, pc.localDescription.sdp)
+    
+    if answer:
+        await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type='answer'))
+    else:
+        logger.error(f"Failed to get answer from {push_url}")
+# =============================================================================
+# 路由处理函数
+# =============================================================================
+
 async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
-
-    # if len(nerfreals) >= opt.max_session:
-    #     logger.info('reach max session')
-    #     return web.Response(
-    #         content_type="application/json",
-    #         text=json.dumps(
-    #             {"code": -1, "msg": "reach max session"}
-    #         ),
-    #     )
-    sessionid = randN(6) #len(nerfreals)
-    nerfreals[sessionid] = None
-    logger.info('sessionid=%d, session num=%d',sessionid,len(nerfreals))
-    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal,sessionid)
-    nerfreals[sessionid] = nerfreal
     
-    #ice_server = RTCIceServer(urls='stun:stun.l.google.com:19302')
+    # 1. 使用 SessionManager 创建会话
+    try:
+        nerfreal = await session_manager.create_session(config, model_instance, avatar_instance)
+        sessionid = nerfreal.session_id
+    except Exception as e:
+        logger.exception("Failed to create session")
+        return web.json_response({"code": -1, "msg": str(e)})
+
+    logger.info(f'New session created: {sessionid}, total sessions: {len(session_manager._sessions)}')
+
+    # WebRTC 配置
     ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[ice_server]))
     pcs.add(pc)
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        logger.info("Connection state is %s" % pc.connectionState)
-        if pc.connectionState == "failed":
+        logger.info(f"Session {sessionid} - Connection state: {pc.connectionState}")
+        if pc.connectionState in ["failed", "closed"]:
             await pc.close()
             pcs.discard(pc)
-            del nerfreals[sessionid]
-        if pc.connectionState == "closed":
-            pcs.discard(pc)
-            del nerfreals[sessionid]
-            # gc.collect()
+            # 2. 使用 SessionManager 销毁会话
+            await session_manager.destroy_session(sessionid)
 
-    player = HumanPlayer(nerfreals[sessionid])
+    player = HumanPlayer(nerfreal)
     audio_sender = pc.addTrack(player.audio)
     video_sender = pc.addTrack(player.video)
+
+    # 编解码器偏好设置
     capabilities = RTCRtpSender.getCapabilities("video")
     preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
     preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
@@ -128,321 +136,282 @@ async def offer(request):
     transceiver.setCodecPreferences(preferences)
 
     await pc.setRemoteDescription(offer)
-
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
-
-    #return jsonify({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
 
     return web.Response(
         content_type="application/json",
         text=json.dumps(
-            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "sessionid":sessionid}
+            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type, "sessionid": sessionid}
         ),
     )
 
 async def human(request):
     try:
         params = await request.json()
+        sessionid = params.get('sessionid', 0)
+        
+        # 使用 SessionManager 获取会话
+        session = session_manager.get_session(sessionid)
+        if not session:
+            return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
 
-        sessionid = params.get('sessionid',0)
         if params.get('interrupt'):
-            nerfreals[sessionid].flush_talk()
-
-        if params['type']=='echo':
-            nerfreals[sessionid].put_msg_txt(params['text'])
-        elif params['type']=='chat':
-            asyncio.get_event_loop().run_in_executor(None, llm_response, params['text'],nerfreals[sessionid])                         
-            #nerfreals[sessionid].put_msg_txt(res)
-
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg":"ok"}
-            ),
-        )
+            session.flush_talk()
+        
+        if params['type'] == 'echo':
+            session.put_msg_txt(params['text'])
+        elif params['type'] == 'chat':
+            # 定义回调函数
+            def callback(text):
+                session.put_msg_txt(text)
+            
+            # 在线程池中执行 LLM 调用
+            # 注意：需判断 llm_service 是否初始化成功
+            if llm_service:
+                def run_llm():
+                    async for text_segment in llm_service.chat_stream(params['text']):
+                        session.put_msg_txt(text_segment)
+                asyncio.get_event_loop().run_in_executor(None, run_llm)
+            else:
+                logger.error("LLM service not initialized.")
+                return web.json_response({"code": -1, "msg": "LLM service not ready"})
+    
+        return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
-        logger.exception('exception:')
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
-        )
+        logger.exception("Error in /human")
+        return web.json_response({"code": -1, "msg": str(e)})
 
 async def interrupt_talk(request):
     try:
         params = await request.json()
-
-        sessionid = params.get('sessionid',0)
-        nerfreals[sessionid].flush_talk()
+        sessionid = params.get('sessionid', 0)
         
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg":"ok"}
-            ),
-        )
+        session = session_manager.get_session(sessionid)
+        if session:
+            session.flush_talk()
+            
+        return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
-        logger.exception('exception:')
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
-        )
+        logger.exception("Error in /interrupt_talk")
+        return web.json_response({"code": -1, "msg": str(e)})
 
 async def humanaudio(request):
+    """处理上传的音频文件"""
     try:
-        form= await request.post()
-        sessionid = int(form.get('sessionid',0))
+        form = await request.post()
+        sessionid = int(form.get('sessionid', 0))
         fileobj = form["file"]
-        filename=fileobj.filename
-        filebytes=fileobj.file.read()
-        nerfreals[sessionid].put_audio_file(filebytes)
+        # filename = fileobj.filename # 暂时未使用
+        filebytes = fileobj.file.read()
+        
+        session = session_manager.get_session(sessionid)
+        if session:
+            session.put_audio_file(filebytes)
+        else:
+             return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
 
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg":"ok"}
-            ),
-        )
+        return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
-        logger.exception('exception:')
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
-        )
+        logger.exception("Error in /humanaudio")
+        return web.json_response({"code": -1, "msg": str(e)})
 
 async def set_audiotype(request):
+    """设置自定义音频/视频状态"""
     try:
         params = await request.json()
+        sessionid = params.get('sessionid', 0)
+        
+        session = session_manager.get_session(sessionid)
+        if session:
+            session.set_custom_state(params['audiotype'], params.get('reinit', True))
+        else:
+             return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
 
-        sessionid = params.get('sessionid',0)    
-        nerfreals[sessionid].set_custom_state(params['audiotype'],params['reinit'])
-
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg":"ok"}
-            ),
-        )
+        return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
-        logger.exception('exception:')
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
-        )
+        logger.exception("Error in /set_audiotype")
+        return web.json_response({"code": -1, "msg": str(e)})
 
 async def record(request):
+    """控制录制开始/结束"""
     try:
         params = await request.json()
+        sessionid = params.get('sessionid', 0)
+        
+        session = session_manager.get_session(sessionid)
+        if not session:
+             return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
 
-        sessionid = params.get('sessionid',0)
-        if params['type']=='start_record':
-            # nerfreals[sessionid].put_msg_txt(params['text'])
-            nerfreals[sessionid].start_recording()
-        elif params['type']=='end_record':
-            nerfreals[sessionid].stop_recording()
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": 0, "msg":"ok"}
-            ),
-        )
+        if params['type'] == 'start_record':
+            # 获取当前视频帧分辨率用于初始化 recorder
+            if len(session.frame_list_cycle) > 0:
+                h, w, _ = session.frame_list_cycle[0].shape
+                session.recorder.set_resolution(w, h)
+            session.recorder.start()
+        elif params['type'] == 'end_record':
+            session.recorder.stop()
+            
+        return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
-        logger.exception('exception:')
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps(
-                {"code": -1, "msg": str(e)}
-            ),
-        )
+        logger.exception("Error in /record")
+        return web.json_response({"code": -1, "msg": str(e)})
 
 async def is_speaking(request):
     params = await request.json()
-
-    sessionid = params.get('sessionid',0)
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(
-            {"code": 0, "data": nerfreals[sessionid].is_speaking()}
-        ),
-    )
-
+    sessionid = params.get('sessionid', 0)
+    session = session_manager.get_session(sessionid)
+    speaking = session.is_speaking() if session else False
+    return web.json_response({"code": 0, "data": speaking})
 
 async def on_shutdown(app):
-    # close peer connections
+    logger.info("Shutting down server...")
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros)
     pcs.clear()
 
-async def post(url,data):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url,data=data) as response:
-                return await response.text()
-    except aiohttp.ClientError as e:
-        logger.info(f'Error: {e}')
-
-async def run(push_url,sessionid):
-    nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal,sessionid)
-    nerfreals[sessionid] = nerfreal
-
-    pc = RTCPeerConnection()
-    pcs.add(pc)
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        logger.info("Connection state is %s" % pc.connectionState)
-        if pc.connectionState == "failed":
-            await pc.close()
-            pcs.discard(pc)
-
-    player = HumanPlayer(nerfreals[sessionid])
-    audio_sender = pc.addTrack(player.audio)
-    video_sender = pc.addTrack(player.video)
-
-    await pc.setLocalDescription(await pc.createOffer())
-    answer = await post(push_url,pc.localDescription.sdp)
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer,type='answer'))
-##########################################
-# os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-# os.environ['MULTIPROCESSING_METHOD'] = 'forkserver'                                                    
-if __name__ == '__main__':
-    mp.set_start_method('spawn')
-    parser = argparse.ArgumentParser()
+# =============================================================================
+# 启动逻辑
+# =============================================================================
+def init_model():
+    """P1: 使用新的加载路径"""
+    global model_instance, avatar_instance, config
     
-    # audio FPS
-    parser.add_argument('--fps', type=int, default=50, help="audio fps,must be 50")
-    # sliding window left-middle-right length (unit: 20ms)
-    parser.add_argument('-l', type=int, default=10)
-    parser.add_argument('-m', type=int, default=8)
-    parser.add_argument('-r', type=int, default=10)
+    logger.info(f"Initializing model: {config.model.name}")
+    if config.model.name == 'musetalk':
+        model_instance = load_musetalk_model()
+        avatar_instance = load_musetalk_avatar(config.model.avatar_id)
+        warm_up_musetalk(config.model.batch_size, model_instance)
+        
+    elif config.model.name == 'wav2lip':
+        model_instance = load_wav2lip_model("./models/wav2lip.pth")
+        avatar_instance = load_wav2lip_avatar(config.model.avatar_id)
+        warm_up_wav2lip(config.model.batch_size, model_instance, 256)
+        
+    elif config.model.name == 'ultralight':
+        audio_processor = load_ultralight_model()
+        ultralight_model, frames, faces, coords = load_ultralight_avatar(config.model.avatar_id)
+        model_instance = audio_processor
+        avatar_instance = (ultralight_model, frames, faces, coords)
+        warm_up_ultralight(config.model.batch_size, avatar_instance, 160)
 
-    parser.add_argument('--W', type=int, default=450, help="GUI width")
-    parser.add_argument('--H', type=int, default=450, help="GUI height")
+def main():
+    global config, llm_service
+    
+    # 1. 加载配置
+    config = AppConfig.from_args()
+    logger.info(f"Configuration loaded: {config}")
 
-    #musetalk opt
-    parser.add_argument('--avatar_id', type=str, default='avator_1', help="define which avatar in data/avatars")
-    #parser.add_argument('--bbox_shift', type=int, default=5)
-    parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
+    # 2. 初始化进程模式
+    mp.set_start_method('spawn')
+    
+    # 3. 初始化 LLM 服务 (即使 API Key 为空也初始化，防止报错，内部会处理)
+    try:
+        llm_service = create_llm_service(config)
+    except Exception as e:
+        logger.warning(f"LLM Service initialization failed: {e}")
 
-    parser.add_argument('--customvideo_config', type=str, default='', help="custom action json")
-
-    parser.add_argument('--tts', type=str, default='edgetts', help="tts service type") #xtts gpt-sovits cosyvoice fishtts tencent doubao indextts2 azuretts
-    parser.add_argument('--REF_FILE', type=str, default="zh-CN-YunxiaNeural",help="参考文件名或语音模型ID，默认值为 edgetts的语音模型ID zh-CN-YunxiaNeural, 若--tts指定为azuretts, 可以使用Azure语音模型ID, 如zh-CN-XiaoxiaoMultilingualNeural")
-    parser.add_argument('--REF_TEXT', type=str, default=None)
-    parser.add_argument('--TTS_SERVER', type=str, default='http://127.0.0.1:9880') # http://localhost:9000
-    # parser.add_argument('--CHARACTER', type=str, default='test')
-    # parser.add_argument('--EMOTION', type=str, default='default')
-
-    parser.add_argument('--model', type=str, default='musetalk') #musetalk wav2lip ultralight
-
-    parser.add_argument('--transport', type=str, default='rtcpush') #webrtc rtcpush virtualcam
-    parser.add_argument('--push_url', type=str, default='http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream') #rtmp://localhost/live/livestream
-
-    parser.add_argument('--max_session', type=int, default=1)  #multi session count
-    parser.add_argument('--listenport', type=int, default=8010, help="web listen port")
-
-    opt = parser.parse_args()
-    #app.config.from_object(opt)
-    #print(app.config)
-    opt.customopt = []
-    if opt.customvideo_config!='':
-        with open(opt.customvideo_config,'r') as file:
-            opt.customopt = json.load(file)
-
-    # if opt.model == 'ernerf':       
-    #     from nerfreal import NeRFReal,load_model,load_avatar
-    #     model = load_model(opt)
-    #     avatar = load_avatar(opt) 
-    if opt.model == 'musetalk':
-        from musereal import MuseReal,load_model,load_avatar,warm_up
-        logger.info(opt)
-        model = load_model()
-        avatar = load_avatar(opt.avatar_id) 
-        warm_up(opt.batch_size,model)      
-    elif opt.model == 'wav2lip':
-        from lipreal import LipReal,load_model,load_avatar,warm_up
-        logger.info(opt)
-        model = load_model("./models/wav2lip.pth")
-        avatar = load_avatar(opt.avatar_id)
-        warm_up(opt.batch_size,model,256)
-    elif opt.model == 'ultralight':
-        from lightreal import LightReal,load_model,load_avatar,warm_up
-        logger.info(opt)
-        model = load_model(opt)
-        avatar = load_avatar(opt.avatar_id)
-        warm_up(opt.batch_size,avatar,160)
-
-    # if opt.transport=='rtmp':
-    #     thread_quit = Event()
-    #     nerfreals[0] = build_nerfreal(0)
-    #     rendthrd = Thread(target=nerfreals[0].render,args=(thread_quit,))
-    #     rendthrd.start()
-    if opt.transport=='virtualcam':
+    # 4. 预加载模型
+    if config.server.transport == 'virtualcam':
+        # VirtualCam 模式：需要先加载模型，并在主线程外启动渲染
+        init_model()
+        
+        # 创建一个会话实例
+        # 注意：virtualcam 模式通常只需要一个实例，session_id 设为 0
+        logger.info("Running in VirtualCam mode...")
+        
+        # 使用 SessionManager 创建会话
+        # 这里需要在异步环境外调用，或者手动构建
+        # 为简化，我们直接构建 RenderLoop
+        # 注意：VirtualCam 模式通常不经过 WebRTC offer 流程
+        
+        # 由于 SessionManager.create_session 是 async 的，这里做个适配
+        # 或者直接调用工厂逻辑
+        config.session_id = 0
+        
+        # 选择渲染类
+        if config.model.name == 'musetalk':
+             render_cls = MuseRenderLoop
+        elif config.model.name == 'wav2lip':
+             render_cls = LipRenderLoop
+        elif config.model.name == 'ultralight':
+             render_cls = LightRenderLoop
+        else: raise ValueError("Unknown model")
+        
+        render_loop = render_cls(config, model_instance, avatar_instance)
+        
+        # 启动渲染线程
+        from threading import Event
         thread_quit = Event()
-        nerfreals[0] = build_nerfreal(0)
-        rendthrd = Thread(target=nerfreals[0].render,args=(thread_quit,))
-        rendthrd.start()
+        # 启动 render 方法 (注意 render 方法是阻塞的，或者内部启动线程)
+        # 原 BaseReal.render 是启动线程，但我们的 RenderLoop.render 是阻塞循环
+        # 我们需要将其放在独立线程中运行
+        import threading
+        render_thread = threading.Thread(target=render_loop.render, args=(thread_quit,))
+        render_thread.daemon = True
+        render_thread.start()
+        
+        logger.info("VirtualCam render thread started.")
+        pass
 
-    #############################################################################
-    appasync = web.Application(client_max_size=1024**2*100)
-    appasync.on_shutdown.append(on_shutdown)
-    appasync.router.add_post("/offer", offer)
-    appasync.router.add_post("/human", human)
-    appasync.router.add_post("/humanaudio", humanaudio)
-    appasync.router.add_post("/set_audiotype", set_audiotype)
-    appasync.router.add_post("/record", record)
-    appasync.router.add_post("/interrupt_talk", interrupt_talk)
-    appasync.router.add_post("/is_speaking", is_speaking)
-    appasync.router.add_static('/',path='web')
-
-    # Configure default CORS settings.
-    cors = aiohttp_cors.setup(appasync, defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-            )
-        })
-    # Configure CORS on all routes.
-    for route in list(appasync.router.routes()):
-        cors.add(route)
-
-    pagename='webrtcapi.html'
-    if opt.transport=='rtmp':
-        pagename='echoapi.html'
-    elif opt.transport=='rtcpush':
-        pagename='rtcpushapi.html'
-    logger.info('start http server; http://<serverip>:'+str(opt.listenport)+'/'+pagename)
-    logger.info('如果使用webrtc，推荐访问webrtc集成前端: http://<serverip>:'+str(opt.listenport)+'/dashboard.html')
+    else:
+        # WebRTC / RTCPush 模式：预加载模型
+        init_model()
     def run_server(runner):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())
-        site = web.TCPSite(runner, '0.0.0.0', opt.listenport)
+        site = web.TCPSite(runner, '0.0.0.0', config.server.listenport)
         loop.run_until_complete(site.start())
-        if opt.transport=='rtcpush':
-            for k in range(opt.max_session):
-                push_url = opt.push_url
-                if k!=0:
-                    push_url = opt.push_url+str(k)
-                loop.run_until_complete(run(push_url,k))
-        loop.run_forever()    
-    #Thread(target=run_server, args=(web.AppRunner(appasync),)).start()
-    run_server(web.AppRunner(appasync))
+        
+        # 如果是 rtcpush 模式，启动推流
+        if config.server.transport == 'rtcpush':
+            for k in range(config.server.max_session):
+                push_url = config.server.push_url
+                if k != 0:
+                    push_url = config.server.push_url + str(k)
+                # 在事件循环中启动推流任务
+                loop.run_until_complete(run(push_url, k))
+                
+        loop.run_forever()
+    # 5. 构建 Web 应用
+    app = web.Application(client_max_size=1024**2 * 100) # 100MB upload limit
+    app.on_shutdown.append(on_shutdown)
 
-    #app.on_shutdown.append(on_shutdown)
-    #app.router.add_post("/offer", offer)
+    # 6. 注册路由
+    app.router.add_post("/offer", offer)
+    app.router.add_post("/human", human)
+    app.router.add_post("/humanaudio", humanaudio)
+    app.router.add_post("/set_audiotype", set_audiotype)
+    app.router.add_post("/record", record)
+    app.router.add_post("/interrupt_talk", interrupt_talk)
+    app.router.add_post("/is_speaking", is_speaking)
+    
+    # 静态文件目录
+    app.router.add_static('/', path='web')
 
-    # print('start websocket server')
-    # server = pywsgi.WSGIServer(('0.0.0.0', 8000), app, handler_class=WebSocketHandler)
-    # server.serve_forever()
-    
-    
+    # 7. CORS 配置
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+        )
+    })
+    for route in list(app.router.routes()):
+        cors.add(route)
+
+    # 8. 启动服务
+    pagename = 'webrtcapi.html'
+    if config.server.transport == 'rtmp':
+        pagename = 'echoapi.html'
+    elif config.server.transport == 'rtcpush':
+        pagename = 'rtcpushapi.html'
+        
+    logger.info(f"Server running at http://{config.server.host}:{config.server.listenport}/{pagename}")
+    logger.info(f"If using WebRTC, visit: http://{config.server.host}:{config.server.listenport}/dashboard.html")
+
+    run_server(web.AppRunner(app))
+
+if __name__ == '__main__':
+    main()
