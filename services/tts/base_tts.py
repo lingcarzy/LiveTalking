@@ -45,7 +45,8 @@ class BaseTTS(ABC):
 
     def render(self, quit_event: Event):
         """启动 TTS 处理线程"""
-        process_thread = Thread(target=self.process_tts, args=(quit_event,))
+        actual_event = quit_event if quit_event is not None else self.parent._quit_event
+        process_thread = Thread(target=self.process_tts, args=(actual_event,))
         process_thread.start()
 
     def process_tts(self, quit_event: Event):

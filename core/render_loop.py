@@ -28,7 +28,9 @@ class RenderLoop:
         self.config = config
         self.model = model_instance
         self.avatar = avatar_data
-        
+
+        self._quit_event = Event()
+        self._worker_threads = []
         # 基础参数
         self.sample_rate = 16000
         self.chunk = self.sample_rate // config.model.fps
@@ -61,7 +63,7 @@ class RenderLoop:
         self.custom_audio_cycle = {}
         self.custom_audio_index = {}
         self.custom_index = {}
-        
+
         # 结果队列 (由子类或 Inference 线程填充)
         self.res_frame_queue = queue.Queue(maxsize=config.model.batch_size * 2)
 
@@ -240,34 +242,31 @@ class RenderLoop:
     def render(self, quit_event, loop=None, audio_track=None, video_track=None):
         """主入口：启动 ASR, TTS, Inference 和 Frame Processor"""
         # 1. 启动 TTS
-        self.tts.render(quit_event)
+        self.tts.render(self._quit_event)
         
         # 2. 预热 ASR
         self.asr.warm_up()
         
         # 3. 启动推理线程 (由子类实现具体逻辑)
-        infer_quit = Event()
-        infer_thread = Thread(target=self._inference_thread_entry, args=(infer_quit,))
+        infer_thread = Thread(target=self._inference_thread_entry, args=(self._quit_event,))
         infer_thread.start()
 
         # 4. 启动渲染线程
-        render_quit = Event()
-        render_thread = Thread(target=self.process_frames, args=(render_quit, loop, audio_track, video_track))
+        render_thread = Thread(target=self.process_frames, args=(self._quit_event, loop, audio_track, video_track))
         render_thread.start()
+        self._worker_threads.append(render_thread)
 
         # 5. 主循环 (驱动 ASR)
         try:
-            while not quit_event.is_set():
+            while not self._quit_event.is_set():
                 self.asr.run_step()
                 # 流控控制
                 if video_track and video_track._queue.qsize() >= 1.5 * self.config.model.batch_size:
                     time.sleep(0.04 * video_track._queue.qsize() * 0.8)
         finally:
             logger.info("Stopping render...")
-            infer_quit.set()
-            render_quit.set()
-            infer_thread.join()
-            render_thread.join()
+            logger.info(f"Session {self.session_id} main loop exited.")
+
 
     def _inference_thread_entry(self, quit_event):
         """由子类实现，运行具体的模型推理循环"""
@@ -276,6 +275,31 @@ class RenderLoop:
     def paste_back_frame(self, res_frame, idx: int):
         """由子类实现，将生成的脸部贴回原图"""
         raise NotImplementedError
+    def stop(self):
+        if not hasattr(self, '_quit_event'):
+            return        
+        if self._quit_event.is_set():
+            return
+            
+        logger.info(f"Sending stop signal to RenderLoop session {self.session_id}...")
+        self._quit_event.set()
+        
+        # 唤醒可能阻塞在队列 get() 上的线程，防止 join 时死锁
+        try:
+            dummy_audio = np.zeros(self.chunk, dtype=np.float32)
+            self.asr.output_queue.put((dummy_audio, 1, None), timeout=0.5)
+            # 唤醒 feat_queue (假设是 numpy 数组)
+            self.asr.feat_queue.put(np.zeros((1, 50, 384), dtype=np.uint8), timeout=0.5)
+        except Exception:
+            pass
+            
+        self.tts.flush_talk()
+        
+        # 等待内部线程真正结束 (设置超时防止极端情况卡死)
+        for t in self._worker_threads:
+            t.join(timeout=2.0)
+            
+        logger.info(f"RenderLoop session {self.session_id} stopped successfully.")
     def __del__(self):
         """析构函数：确保资源释放"""
         try:

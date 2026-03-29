@@ -70,7 +70,11 @@ class SessionManager:
                 # 如果有显式关闭 FFmpeg 管道等需求，可实现 session.cleanup()
                 if hasattr(session, 'cleanup'):
                     await session.cleanup()
-                
+                try:
+                    if hasattr(session, 'stop'):
+                        session.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping session {session_id}: {e}")
                 del session
                 gc.collect()
 

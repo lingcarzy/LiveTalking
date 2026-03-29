@@ -134,13 +134,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             self._player._stop(self)
             self._player = None
 
-def player_worker_thread(
-    quit_event,
-    loop,
-    container,
-    audio_track,
-    video_track
-):
+def player_worker_thread(container, quit_event, loop, audio_track, video_track):
     """
     工作线程入口：直接调用 RenderLoop.render
     """
@@ -181,9 +175,9 @@ class HumanPlayer:
                 name="media-player",
                 target=player_worker_thread,
                 args=(
+                    self.__container,
                     self.__thread_quit,
                     self.__loop,
-                    self.__container,
                     self.__audio,
                     self.__video
                 ),
@@ -193,15 +187,6 @@ class HumanPlayer:
 
     def _stop(self, track: PlayerStreamTrack) -> None:
         self.__started.discard(track)
-
-        if not self.__started and self.__thread is not None:
-            mylogger.debug("Stopping worker thread")
-            self.__thread_quit.set()
-            # self.__thread.join() # 守护线程通常不需要 join，或者视具体停止逻辑而定
-            self.__thread = None
-
-        # 注意：不要在这里销毁 __container (RenderLoop)，因为它可能被其他地方引用
-        # 生命周期应由 SessionManager 管理
 
     def __log_debug(self, msg: str, *args) -> None:
         mylogger.debug(f"HumanPlayer {msg}", *args)
