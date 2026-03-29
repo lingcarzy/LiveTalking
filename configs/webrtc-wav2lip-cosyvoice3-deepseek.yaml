@@ -1,0 +1,32 @@
+# configs/default.yaml
+
+# 服务器配置
+server:
+  host: "0.0.0.0"
+  listen_port: 8010
+  transport: "webrtc"  # webrtc, rtcpush, virtualcam
+  push_url: "http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream"
+  max_session: 1
+
+# 模型配置
+model:
+  name: "wav2lip"     # musetalk, wav2lip, ultralight
+  device: "cuda"
+  fps: 50
+  batch_size: 16
+  avatar_id: "wav2lip256_avatar1" # 对应 data/avatars 下的文件夹名
+
+# TTS 配置
+tts:
+  engine: "cosyvoice3"    # edgetts, gpt-sovits, azuretts, etc.
+  server: "http://127.0.0.1:8080"
+  ref_file: ""
+  ref_text: null
+
+# LLM 配置
+llm:
+  provider: "deepseek"
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com/v1"
+  api_key: ""
+  system_msg: "你是真人主播，说话自然口语化，像朋友聊天。禁止用星号、markdown、序号。简短2-3句话。"
