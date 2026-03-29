@@ -1,9 +1,14 @@
 # app.py
+import sys
+import os
+
+# 将当前文件所在的目录（项目根目录）添加到系统路径中
+# 这样 Python 就能找到 configs, core, services 等文件夹了
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import asyncio
 import gc
 import json
 import random
-import os
 import torch.multiprocessing as mp
 from typing import Dict, Optional
 
@@ -162,21 +167,32 @@ async def human(request):
         if params['type'] == 'echo':
             session.put_msg_txt(params['text'])
         elif params['type'] == 'chat':
-            # 定义回调函数
-            def callback(text):
-                session.put_msg_txt(text)
-            
-            # 在线程池中执行 LLM 调用
-            # 注意：需判断 llm_service 是否初始化成功
-            if llm_service:
-                def run_llm():
+            # 定义异步处理流程
+            async def process_chat():
+                try:
+                    # 使用 async for 迭代异步生成器
                     async for text_segment in llm_service.chat_stream(params['text']):
                         session.put_msg_txt(text_segment)
-                asyncio.get_event_loop().run_in_executor(None, run_llm)
+                except Exception as e:
+                    logger.error(f"LLM chat stream error: {e}")
+            
+            # 定义一个同步的包装函数，用于在 executor 中运行
+            def run_async_chat():
+                # 获取当前线程的事件循环，如果没有则创建一个新的
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(process_chat())
+                finally:
+                    loop.close()
+
+            # 在线程池中运行同步包装函数
+            if llm_service:
+                asyncio.get_event_loop().run_in_executor(None, run_async_chat)
             else:
                 logger.error("LLM service not initialized.")
                 return web.json_response({"code": -1, "msg": "LLM service not ready"})
-    
+                
         return web.json_response({"code": 0, "msg": "ok"})
     except Exception as e:
         logger.exception("Error in /human")
@@ -361,7 +377,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())
-        site = web.TCPSite(runner, '0.0.0.0', config.server.listenport)
+        site = web.TCPSite(runner, '0.0.0.0', config.server.listen_port)
         loop.run_until_complete(site.start())
         
         # 如果是 rtcpush 模式，启动推流
@@ -408,8 +424,8 @@ def main():
     elif config.server.transport == 'rtcpush':
         pagename = 'rtcpushapi.html'
         
-    logger.info(f"Server running at http://{config.server.host}:{config.server.listenport}/{pagename}")
-    logger.info(f"If using WebRTC, visit: http://{config.server.host}:{config.server.listenport}/dashboard.html")
+    logger.info(f"Server running at http://{config.server.host}:{config.server.listen_port}/{pagename}")
+    logger.info(f"If using WebRTC, visit: http://{config.server.host}:{config.server.listen_port}/dashboard.html")
 
     run_server(web.AppRunner(app))
 

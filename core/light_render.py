@@ -4,6 +4,7 @@ import queue
 import time
 import copy
 import os
+import cv2
 import pickle
 import glob
 from threading import Event, Thread
