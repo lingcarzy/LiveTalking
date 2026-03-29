@@ -9,18 +9,10 @@ import glob
 import cv2
 from threading import Event, Thread
 
+from core.utils import read_imgs
 from core.render_loop import RenderLoop
 from logger import logger
 from tqdm import tqdm
-
-# Helper to read images, can be moved to utils if needed
-def read_imgs(img_list):
-    frames = []
-    logger.info('reading images...')
-    for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
-        frames.append(frame)
-    return frames
 
 class MuseRenderLoop(RenderLoop):
     def _get_audio_processor(self):
@@ -35,7 +27,7 @@ class MuseRenderLoop(RenderLoop):
 
     def paste_back_frame(self, pred_frame, idx: int):
         bbox = self.coord_list_cycle[idx]
-        ori_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        ori_frame = self.frame_list_cycle[idx].copy()
         x1, y1, x2, y2 = bbox
 
         res_frame = cv2.resize(pred_frame.astype(np.uint8), (x2-x1, y2-y1))

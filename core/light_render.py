@@ -9,17 +9,11 @@ import pickle
 import glob
 from threading import Event, Thread
 
+from core.utils import read_imgs
 from core.render_loop import RenderLoop
 from logger import logger
 from tqdm import tqdm
 
-# Helper
-def read_imgs(img_list):
-    frames = []
-    for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
-        frames.append(frame)
-    return frames
 
 class LightRenderLoop(RenderLoop):
     def _get_audio_processor(self):
@@ -40,7 +34,7 @@ class LightRenderLoop(RenderLoop):
 
     def paste_back_frame(self, pred_frame, idx: int):
         bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        combine_frame = self.frame_list_cycle[idx].copy()
         x1, y1, x2, y2 = bbox
 
         crop_img = self.face_list_cycle[idx]

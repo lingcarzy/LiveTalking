@@ -155,3 +155,28 @@ def warm_up_ultralight(batch_size, avatar, model_res):
     mel_batch = torch.ones(batch_size, 16, 32, 32).to(device)
     with torch.no_grad():
         model(img_batch, mel_batch)
+
+def read_imgs(img_list):
+    frames = []
+    logger.info('reading images...')
+    for img_path in tqdm(img_list):
+        frame = cv2.imread(img_path)
+        frames.append(frame)
+    return frames
+# 辅助函数：音频播放 (用于 virtualcam 模式)
+def play_audio_thread(quit_event, audio_queue):
+    import pyaudio
+    p = pyaudio.PyAudio()
+    stream = p.open(
+        rate=16000,
+        channels=1,
+        format=8,
+        output=True,
+        output_device_index=1,
+    )
+    stream.start_stream()
+    # while queue.qsize() <= 0:
+    #     time.sleep(0.1)
+    while not quit_event.is_set():
+        stream.write(queue.get(block=True))
+    stream.close()

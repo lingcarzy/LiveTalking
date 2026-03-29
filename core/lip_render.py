@@ -9,6 +9,7 @@ import pickle
 import glob
 from threading import Event, Thread
 
+from core.utils import read_imgs
 from core.render_loop import RenderLoop
 from logger import logger
 from tqdm import tqdm
@@ -19,13 +20,6 @@ try:
 except ImportError:
     Wav2Lip = None
 
-# Helper
-def read_imgs(img_list):
-    frames = []
-    for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
-        frames.append(frame)
-    return frames
 
 class LipRenderLoop(RenderLoop):
     def _get_audio_processor(self):
@@ -37,7 +31,7 @@ class LipRenderLoop(RenderLoop):
 
     def paste_back_frame(self, pred_frame, idx: int):
         bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        combine_frame = self.frame_list_cycle[idx].copy()
         y1, y2, x1, x2 = bbox
         res_frame = cv2.resize(pred_frame.astype(np.uint8), (x2-x1, y2-y1))
         combine_frame[y1:y2, x1:x2] = res_frame

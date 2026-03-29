@@ -16,28 +16,12 @@ from fractions import Fraction
 from typing import Any, Dict, List, Optional
 
 from configs import AppConfig
+from core.utils import read_imgs, play_audio_thread
 from services.tts import create_tts_service
 from services.asr import create_asr_service
 from services.media.recorder import MediaRecorder
 from logger import logger
 from tqdm import tqdm
-
-# 辅助函数：读取图片 (保持原逻辑)
-def read_imgs(img_list):
-    frames = []
-    logger.info('Reading images...')
-    for img_path in tqdm(img_list):
-        frame = cv2.imread(img_path)
-        frames.append(frame)
-    return frames
-
-# 辅助函数：音频播放 (用于 virtualcam 模式)
-def play_audio_thread(quit_event, audio_queue):
-    import pyaudio
-    p = pyaudio.PyAudio()
-    # ... (此处保留原 basereal.py 中 play_audio 的完整实现，略)
-    # 为节省篇幅，假设此处代码与原 play_audio 一致
-    pass 
 
 class RenderLoop:
     def __init__(self, config: AppConfig, model_instance: Any, avatar_data: Any):
@@ -84,19 +68,6 @@ class RenderLoop:
         # 初始化数据
         self._load_avatar_data()
         self._load_custom_actions()
-    async def __aenter__(self):
-        """进入上下文：初始化资源"""
-        await self.initialize()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """退出上下文：清理资源"""
-        logger.info(f"Cleaning up RenderLoop session {self.session_id}")
-        if self.recorder:
-            self.recorder.stop()
-        # 显存清理等操作
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
     def _get_audio_processor(self):
         """由子类实现，返回特定的音频处理器 (Whisper/HuBERT/Mel)"""
         raise NotImplementedError
