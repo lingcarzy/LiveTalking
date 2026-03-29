@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveTalking - 数字人交互</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f2f5;
+            max-height: 100vh;
+        }
+
+        /* 顶部标题栏 */
+        header {
+            background: #1a1a2e;
+            color: white;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        header h1 {
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        .status,.controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #dc3545;
+        }
+
+        .status-dot.connected { background: #28a745; box-shadow: 0 0 8px #28a745; }
+        .status-dot.connecting { background: #ffc107; animation: blink 1s infinite; }
+
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        /* 主布局 */
+        main {
+            display: flex;
+            margin: 0 auto;
+        }
+
+        /* 左侧视频区 */
+        .video-section {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .video-box {
+            background: #000;
+            overflow: hidden;
+            position: relative;
+            aspect-ratio: 16/9;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .rec-badge {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: #dc3545;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            display: none;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .rec-badge.active { display: flex; }
+        .rec-dot { width: 6px; height: 6px; background: white; border-radius: 50%; animation: blink 1s infinite; }
+
+        /* 控制栏 */
+        .control-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+
+        button:hover { opacity: 0.85; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-primary { background: #4361ee; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .btn-outline { background: white; border: 1px solid #ddd; color: #333; }
+
+        select, input[type="range"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+
+        /* 右侧交互区 */
+        .chat-section {
+            width: 360px;
+            flex-shrink: 0;
+        }
+
+        .panel {
+            background: white;
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            display: flex;
+            border-bottom: 1px solid #eee;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 14px;
+            text-align: center;
+            cursor: pointer;
+            font-size: 14px;
+            color: #666;
+            background: #f8f9fa;
+            border: none;
+        }
+
+        .tab.active {
+            background: white;
+            color: #4361ee;
+            border-bottom: 2px solid #4361ee;
+        }
+
+        .panel-body {
+            padding: 16px;
+        }
+
+        /* 聊天记录 */
+        .messages {
+            height: 280px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .msg {
+            margin-bottom: 12px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.5;
+            max-width: 90%;
+        }
+
+        .msg-user {
+            background: #4361ee;
+            color: white;
+            margin-left: auto;
+            border-bottom-right-radius: 2px;
+        }
+
+        .msg-system {
+            background: white;
+            border-left: 3px solid #28a745;
+            color: #333;
+        }
+
+        .msg small {
+            display: block;
+            font-size: 11px;
+            opacity: 0.7;
+            margin-bottom: 2px;
+        }
+
+        /* 输入区 */
+        .input-area {
+            display: flex;
+            gap: 8px;
+        }
+
+        textarea {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            resize: none;
+            font-family: inherit;
+            font-size: 14px;
+        }
+
+        .voice-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: #4361ee;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            padding: 0;
+            margin: 0 auto;
+        }
+
+        .voice-btn.recording {
+            background: #dc3545;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.4); }
+            70% { box-shadow: 0 0 0 12px rgba(220, 53, 69, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
+        }
+
+        /* 朗读模式 */
+        .echo-mode { display: none; }
+        .echo-mode.active { display: block; }
+
+        .echo-box textarea {
+            width: 100%;
+            height: 120px;
+            margin-bottom: 12px;
+        }
+
+        .echo-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .echo-actions button { flex: 1; }
+
+        /* ASR面板 */
+        .asr-panel {
+            display: none;
+            padding: 0;
+        }
+
+        .asr-panel.active { display: block; }
+
+        .asr-panel iframe {
+            width: 100%;
+            height: 300px;
+            border: none;
+        }
+
+        /* 快捷操作 */
+        .quick-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        /* 响应式 */
+        @media (max-width: 900px) {
+            main { flex-direction: column; }
+            .chat-section { width: 100%; }
+            .video-box { aspect-ratio: 9/16; }
+
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>数字人交互平台</h1>
+
+            <div class="controls">
+                <div class="control-row">
+
+                    <select id="transport-mode">
+                        <option value="webrtc">WebRTC模式</option>
+                        <option value="whep">WHEP播放</option>
+                        <option value="flv">FLV播放</option>
+                    </select>
+                
+                    <button class="btn-outline" id="btn-rec-start">⏺ 录制</button>
+                    <button class="btn-outline" id="btn-rec-stop" disabled>⏹ 停止录制</button>
+                    
+                    <button class="btn-secondary" id="btn-asr">🎤 语音识别</button>
+
+                    <label style="font-size: 13px; color: #666; display: flex; align-items: center; gap: 6px;">
+                        <input type="checkbox" id="use-stun" checked> 使用STUN
+                    </label>
+                    
+                    <button class="btn-primary" id="btn-start">▶ 开始连接</button>
+                    <button class="btn-danger" id="btn-stop" style="display: none;">⏹ 停止</button>
+                    <div class="status">
+                        <span class="status-dot" id="status-dot"></span>
+                        <span id="status-text">未连接</span>
+                        <span style="margin-left: 12px; color: #666;">Session: <span id="session-id">-</span></span>
+                    </div>
+                </div>
+
+            </div>
+
+    </header>
+
+    <main>
+        <!-- 左侧视频区 -->
+        <section class="video-section">
+            <div class="video-box">
+                <video id="main-video" autoplay playsinline muted></video>
+                <audio id="main-audio" autoplay></audio>
+                <div class="rec-badge" id="rec-badge">
+                    <span class="rec-dot"></span>
+                    <span>录制中</span>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- 右侧交互区 -->
+        <section class="chat-section">
+            <!-- 聊天/朗读面板 -->
+            <div class="panel">
+                <div class="panel-header">
+                    <button class="tab active" data-mode="chat">💬 对话模式</button>
+                    <button class="tab" data-mode="echo">🔊 朗读模式</button>
+                </div>
+                
+                <div class="panel-body">
+                    <!-- 对话模式 -->
+                    <div id="chat-mode">
+                        <div class="messages" id="messages">
+                            <div class="msg msg-system">
+                                <small>系统</small>
+                                <div>点击"开始连接"启动数字人</div>
+                            </div>
+                        </div>
+                        
+                        <div class="input-area">
+                            <textarea id="chat-input" rows="2" placeholder="输入消息..."></textarea>
+                            <button class="btn-primary">发送</button>
+                        </div>
+                        
+                        <div style="text-align: center; margin-top: 12px;">
+                            <button class="voice-btn" id="voice-btn" title="按住说话">🎤</button>
+                        </div>
+                    </div>
+
+                    <!-- 朗读模式 -->
+                    <div class="echo-mode" id="echo-mode">
+                        <div class="echo-box">
+                            <textarea id="echo-input" placeholder="输入要朗读的文本..."></textarea>
+                            <div class="echo-actions">
+                                <button class="btn-primary">🔊 朗读</button>
+                                <button class="btn-outline" id="btn-clear">清空</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="quick-actions">
+                        <button class="btn-outline" id="btn-audio-type">🎵 切换音频</button>
+                        <button class="btn-outline" id="btn-interrupt">⏹ 打断播放</button>
+                    </div>
+                </div>
+            </div>
+            <!-- ASR面板 -->
+            <div class="panel asr-panel" id="asr-panel">
+                <iframe src="asr/index.html" id="asr-frame"></iframe>
+            </div>
+        </section>
+    </main>
+
+    <!-- 库文件 -->
+    <script src="mpegts-1.7.3.min.js"></script>
+    <script src="srs.sdk.js"></script>
+    <script>
+const LiveTalkingSimple = (function() {
+    const CFG = {
+        host: window.location.hostname,
+        webrtcPort: 1985,
+        flvPort: 8080
+    };
+
+    const state = {
+        connected: false,
+        recording: false,
+        asrOpen: false,
+        mode: 'chat',
+        transport: 'webrtc',
+        sessionId: 0,
+        pc: null,
+        sdk: null,
+        flvPlayer: null,
+        recognition: null
+    };
+
+    const $ = id => document.getElementById(id);
+
+    function init() {
+        // 绑定事件
+        $('btn-start').onclick = start;
+        $('btn-stop').onclick = stop;
+        $('btn-rec-start').onclick = startRec;
+        $('btn-rec-stop').onclick = stopRec;
+        $('btn-asr').onclick = toggleASR;
+        $('voice-btn').onmousedown = startVoice;
+        $('voice-btn').onmouseup = stopVoice;
+        $('voice-btn').ontouchstart = e => { e.preventDefault(); startVoice(); };
+        $('voice-btn').ontouchend = e => { e.preventDefault(); stopVoice(); };
+        
+        // 模式切换
+        document.querySelectorAll('.tab[data-mode]').forEach(tab => {
+            tab.onclick = () => switchMode(tab.dataset.mode);
+        });
+
+        // 表单
+        $('chat-input').nextElementSibling.onclick = sendChat;
+        $('echo-input').nextElementSibling.firstElementChild.onclick = sendEcho;
+        $('btn-clear').onclick = () => $('echo-input').value = '';
+        $('btn-audio-type').onclick = switchAudio;
+        $('btn-interrupt').onclick = interrupt;
+
+        $('transport-mode').onchange = e => {
+            state.transport = e.target.value;
+            if (state.connected) {
+                alert('切换模式需重新连接');
+                stop();
+            }
+        };
+
+        initSpeech();
+        setStatus('disconnected');
+    }
+
+    function setStatus(s) {
+        const dot = $('status-dot');
+        dot.className = 'status-dot ' + s;
+        $('status-text').textContent = 
+            s === 'connected' ? '已连接' : 
+            s === 'connecting' ? '连接中...' : '未连接';
+    }
+
+    async function start() {
+        if (state.connected) return;
+        setStatus('connecting');
+        $('btn-start').style.display = 'none';
+        $('btn-stop').style.display = 'inline-block';
+
+        try {
+            if (state.transport === 'webrtc') await initWebRTC();
+            else if (state.transport === 'whep') await initWHEP();
+            else initFLV();
+
+            state.connected = true;
+            setStatus('connected');
+            addMsg('系统', '数字人已连接', 'system');
+        } catch (e) {
+            console.error(e);
+            setStatus('disconnected');
+            $('btn-start').style.display = 'inline-block';
+            $('btn-stop').style.display = 'none';
+            alert('连接失败: ' + e.message);
+        }
+    }
+
+    function stop() {
+        if (state.pc) { state.pc.close(); state.pc = null; }
+        if (state.sdk) { state.sdk.close(); state.sdk = null; }
+        if (state.flvPlayer) { state.flvPlayer.destroy(); state.flvPlayer = null; }
+        if (state.recording) stopRec();
+        
+        state.connected = false;
+        state.sessionId = 0;
+        $('session-id').textContent = '-';
+        setStatus('disconnected');
+        $('btn-start').style.display = 'inline-block';
+        $('btn-stop').style.display = 'none';
+        $('main-video').srcObject = null;
+        addMsg('系统', '连接已断开', 'system');
+    }
+
+    async function initWebRTC() {
+        const cfg = {
+            sdpSemantics: 'unified-plan',
+            iceServers: $('use-stun').checked ? 
+                [{urls: ['stun:stun.l.google.com:19302']}] : []
+        };
+        state.pc = new RTCPeerConnection(cfg);
+        state.pc.addTransceiver('video', {direction: 'recvonly'});
+        state.pc.addTransceiver('audio', {direction: 'recvonly'});
+        
+        state.pc.ontrack = e => {
+            if (e.track.kind === 'video') $('main-video').srcObject = e.streams[0];
+            else $('main-audio').srcObject = e.streams[0];
+        };
+
+        const offer = await state.pc.createOffer();
+        await state.pc.setLocalDescription(offer);
+        
+        // 等待ICE
+        await new Promise(r => {
+            if (state.pc.iceGatheringState === 'complete') r();
+            else state.pc.onicegatheringstatechange = () => {
+                if (state.pc.iceGatheringState === 'complete') r();
+            };
+        });
+
+        const res = await fetch('/offer', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                sdp: state.pc.localDescription.sdp,
+                type: state.pc.localDescription.type
+            })
+        });
+        const ans = await res.json();
+        state.sessionId = ans.sessionid || 0;
+        $('session-id').textContent = state.sessionId;
+        await state.pc.setRemoteDescription(ans);
+    }
+
+    async function initWHEP() {
+        state.sdk = new SrsRtcWhipWhepAsync();
+        $('main-video').srcObject = state.sdk.stream;
+        
+        const url = `http://${CFG.host}:${CFG.webrtcPort}/rtc/v1/whep/?app=live&stream=livestream`;
+        const sess = await state.sdk.play(url);
+        state.sessionId = sess.sessionid || 0;
+        $('session-id').textContent = state.sessionId;
+    }
+
+    function initFLV() {
+        if (!mpegts.isSupported()) throw new Error('FLV不支持');
+        const url = `http://${CFG.host}:${CFG.flvPort}/live/livestream.flv`;
+        state.flvPlayer = mpegts.createPlayer({
+            type: 'flv', url: url, isLive: true, enableStashBuffer: false
+        });
+        state.flvPlayer.attachMediaElement($('main-video'));
+        state.flvPlayer.load();
+        state.flvPlayer.play();
+        state.sessionId = 0;
+        $('session-id').textContent = 'FLV';
+    }
+
+    function startRec() {
+        if (!state.connected) return alert('请先连接');
+        fetch('/record', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({type: 'start_record', sessionid: state.sessionId})
+        }).then(r => {
+            if (r.ok) {
+                state.recording = true;
+                $('btn-rec-start').disabled = true;
+                $('btn-rec-stop').disabled = false;
+                $('rec-badge').classList.add('active');
+            }
+        });
+    }
+
+    function stopRec() {
+        fetch('/record', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({type: 'end_record', sessionid: state.sessionId})
+        }).then(r => {
+            if (r.ok) {
+                state.recording = false;
+                $('btn-rec-start').disabled = false;
+                $('btn-rec-stop').disabled = true;
+                $('rec-badge').classList.remove('active');
+            }
+        });
+    }
+
+    function toggleASR() {
+        state.asrOpen = !state.asrOpen;
+        $('asr-panel').classList.toggle('active', state.asrOpen);
+        $('btn-asr').style.background = state.asrOpen ? '#4361ee' : '';
+        $('btn-asr').style.color = state.asrOpen ? 'white' : '';
+        if (state.asrOpen) $('asr-frame').src = 'asr/index.html';
+    }
+
+    function switchMode(m) {
+        state.mode = m;
+        document.querySelectorAll('.tab[data-mode]').forEach(t => {
+            t.classList.toggle('active', t.dataset.mode === m);
+        });
+        $('chat-mode').style.display = m === 'chat' ? 'block' : 'none';
+        $('echo-mode').classList.toggle('active', m === 'echo');
+    }
+
+    function sendChat() {
+        const text = $('chat-input').value.trim();
+        if (!text) return;
+        if (!state.connected) return alert('请先连接');
+        addMsg('我', text, 'user');
+        $('chat-input').value = '';
+        
+        fetch('/human', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                text: text, type: 'chat', interrupt: true, sessionid: state.sessionId
+            })
+        });
+    }
+
+    function sendEcho() {
+        const text = $('echo-input').value.trim();
+        if (!text) return;
+        fetch('/human', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                text: text, type: 'echo', interrupt: true, sessionid: state.sessionId
+            })
+        });
+        addMsg('系统', `朗读: ${text.slice(0, 20)}${text.length > 20 ? '...' : ''}`, 'system');
+    }
+
+    function addMsg(from, text, type) {
+        const div = document.createElement('div');
+        div.className = 'msg msg-' + type;
+        div.innerHTML = type === 'system' ? `<small>${from}</small><div>${text}</div>` : text;
+        $('messages').appendChild(div);
+        $('messages').scrollTop = $('messages').scrollHeight;
+    }
+
+    function initSpeech() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { $('voice-btn').style.display = 'none'; return; }
+        
+        state.recognition = new SR();
+        state.recognition.continuous = true;
+        state.recognition.interimResults = true;
+        state.recognition.lang = 'zh-CN';
+        
+        state.recognition.onresult = e => {
+            let final = '', interim = '';
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+                if (e.results[i].isFinal) final += e.results[i][0].transcript;
+                else interim += e.results[i][0].transcript;
+            }
+            $('chat-input').value = final || interim;
+        };
+    }
+
+    function startVoice() {
+        if (!state.recognition) return;
+        $('voice-btn').classList.add('recording');
+        navigator.mediaDevices.getUserMedia({audio: true})
+            .then(() => state.recognition.start())
+            .catch(() => alert('无法访问麦克风'));
+    }
+
+    function stopVoice() {
+        if (!$('voice-btn').classList.contains('recording')) return;
+        $('voice-btn').classList.remove('recording');
+        state.recognition.stop();
+        setTimeout(() => {
+            const text = $('chat-input').value.trim();
+            if (text) { sendChat(); $('chat-input').value = ''; }
+        }, 300);
+    }
+
+    function switchAudio() {
+        if (!state.connected) return alert('请先连接');
+        const type = prompt('音频类型 (0-9):', '0');
+        if (type === null) return;
+        fetch('/set_audiotype', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({audiotype: parseInt(type), reinit: false, sessionid: state.sessionId})
+        });
+    }
+
+    function interrupt() {
+        if (!state.connected) return;
+        fetch('/human', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({text: '', type: 'interrupt', interrupt: true, sessionid: state.sessionId})
+        });
+    }
+
+    return {init};
+})();
+
+document.addEventListener('DOMContentLoaded', LiveTalkingSimple.init);
+    </script>
+</body>
+</html>
