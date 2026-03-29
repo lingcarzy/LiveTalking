@@ -16,8 +16,8 @@ import torch
 from tqdm import tqdm
 
 # 注意：这里的导入路径可能需要根据你实际的项目结构调整
-# 如果直接运行 python scripts/gen_avatar_musetalk.py 报错找不到模块，
-# 可以在脚本开头加上 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from musetalk.utils.preprocessing import get_landmark_and_bbox
 from musetalk.utils.blending import get_image_prepare_material
 from musetalk.utils.utils import load_all_model
