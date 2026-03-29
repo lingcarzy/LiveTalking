@@ -8,6 +8,7 @@ from .edge_tts import EdgeTTS
 from .fish_tts import FishTTS
 from .sovits_tts import SovitsTTS
 from .cosyvoice_tts import CosyVoiceTTS
+from .cosyvoice3_tts import CosyVoice3TTS
 from .tencent_tts import TencentTTS
 from .doubao_tts import DoubaoTTS
 from .index_tts import IndexTTS2
@@ -23,6 +24,7 @@ def create_tts_service(config: TTSConfig, parent_ref: Any) -> BaseTTS:
         "fishtts": FishTTS,
         "gpt-sovits": SovitsTTS,
         "cosyvoice": CosyVoiceTTS,
+        "cosyvoice3": CosyVoice3TTS,
         "tencent": TencentTTS,
         "doubao": DoubaoTTS,
         "indextts2": IndexTTS2,
