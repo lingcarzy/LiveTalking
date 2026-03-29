@@ -7,13 +7,12 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Any
 
 # 定义配置数据类
-@dataclass
-class ServerConfig:
+class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
-    listen_port: int = 8010
-    transport: str = "webrtc"
+    listen_port: int = Field(8010, gt=1024, lt=65535) # 增加端口范围校验
+    transport: str = Field("webrtc", pattern="^(webrtc|rtmp|rtcpush|virtualcam)$")
     push_url: str = ""
-    max_session: int = 1
+    max_session: int = Field(1, gt=0)
 
 class ModelConfig(BaseModel):
     name: str = Field("musetalk", pattern="^(musetalk|wav2lip|ultralight)$")
@@ -22,30 +21,26 @@ class ModelConfig(BaseModel):
     batch_size: int = Field(8, gt=0)
     avatar_id: str
 
-@dataclass
-class TTSConfig:
+class TTSConfig(BaseModel):
     engine: str = "edgetts"
     server: str = ""
     ref_file: str = ""
     ref_text: Optional[str] = None
 
-@dataclass
-class LLMConfig:
+class LLMConfig(BaseModel):
     provider: str = "openai"
     model: str = "gpt-3.5-turbo"
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     system_msg: str = "You are a helpful assistant."
 
-@dataclass
-class AppConfig:
-    server: ServerConfig = field(default_factory=ServerConfig)
-    model: ModelConfig = field(default_factory=ModelConfig)
-    tts: TTSConfig = field(default_factory=TTSConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
+class AppConfig(BaseModel):
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    model: ModelConfig = Field(default_factory=ModelConfig)
+    tts: TTSConfig = Field(default_factory=TTSConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     
-    # 运行时参数，通常不在配置文件中写死
-    customopt: List[Any] = field(default_factory=list)
+    customopt: List[Any] = Field(default_factory=list)
     session_id: int = 0
 
     @classmethod
@@ -101,7 +96,7 @@ class AppConfig:
         return config
 
     def __str__(self):
-        return yaml.dump(asdict(self), default_flow_style=False, allow_unicode=True)
+        return yaml.dump(self.model_dump(), default_flow_style=False, allow_unicode=True)
 
 # 引入 logger (防止循环导入，这里简单处理)
 try:
