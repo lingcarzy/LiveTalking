@@ -16,7 +16,10 @@ class SessionManager:
     def _generate_id(self) -> int:
         """生成 6 位随机 ID"""
         return random.randint(100000, 999999)
-
+    async def register_session(self, session_id: int, render_loop: RenderLoop):
+        """外部安全注册会话（主要用于RTCPush）"""
+        async with self._lock:
+            self._sessions[session_id] = render_loop
     async def create_session(self, config: AppConfig, model_instance: Any, avatar_instance: Any) -> RenderLoop:
         """
         创建新的渲染会话

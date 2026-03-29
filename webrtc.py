@@ -150,7 +150,8 @@ class HumanPlayer:
     """
     适配器：连接 WebRTC 轨道与 RenderLoop
     """
-    def __init__(self, nerfreal):
+    def __init__(self, nerfreal, loop: asyncio.AbstractEventLoop):
+        self.__loop = loop
         self.__thread: Optional[threading.Thread] = None
         self.__thread_quit: Optional[threading.Event] = None
         self.__started: Set[PlayerStreamTrack] = set()
@@ -181,7 +182,7 @@ class HumanPlayer:
                 target=player_worker_thread,
                 args=(
                     self.__thread_quit,
-                    asyncio.get_event_loop(),
+                    self.__loop,
                     self.__container,
                     self.__audio,
                     self.__video

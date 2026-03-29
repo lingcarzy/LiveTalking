@@ -1,14 +1,16 @@
 # app.py
 import sys
 import os
+import signal
+import time
 
 # 将当前文件所在的目录（项目根目录）添加到系统路径中
-# 这样 Python 就能找到 configs, core, services 等文件夹了
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import asyncio
 import gc
 import json
 import random
+import ipaddress
 import torch.multiprocessing as mp
 from typing import Dict, Optional
 
@@ -36,12 +38,14 @@ from logger import logger
 
 # 全局变量
 pcs = set()  # WebRTC 连接集合
-# 全局配置对象
 config: Optional[AppConfig] = None
 llm_service = None
-# 全局模型实例 (暂时保留，避免重复加载)
 model_instance = None
 avatar_instance = None
+
+# 新增：虚拟摄像头模式的全局退出控制
+virtualcam_quit_event = None
+virtualcam_render_thread = None
 
 # =============================================================================
 # 辅助函数
@@ -54,14 +58,11 @@ async def post(url, data):
     except aiohttp.ClientError as e:
         logger.error(f'HTTP POST Error: {e}')
         return None
+
 async def run(push_url, sessionid):
     """P2: RTCPush 模式专用启动逻辑"""
-    # 注意：这里的 session 创建逻辑与 WebRTC offer 不同
-    # 我们直接调用 SessionManager 的内部逻辑或工厂方法
     config.session_id = sessionid
     
-    # 简单起见，直接实例化 (或者调用 session_manager.create_session 的同步版本)
-    # 这里为了保持一致性，我们手动构建
     if config.model.name == 'musetalk':
          render_cls = MuseRenderLoop
     elif config.model.name == 'wav2lip':
@@ -71,8 +72,7 @@ async def run(push_url, sessionid):
     else: return
 
     render_loop = render_cls(config, model_instance, avatar_instance)
-    # 将其加入管理 (可选，如果需要后续控制)
-    session_manager._sessions[sessionid] = render_loop
+    await session_manager.register_session(sessionid, render_loop)
 
     pc = RTCPeerConnection()
     pcs.add(pc)
@@ -85,7 +85,7 @@ async def run(push_url, sessionid):
             pcs.discard(pc)
             await session_manager.destroy_session(sessionid)
 
-    player = HumanPlayer(render_loop)
+    player = HumanPlayer(render_loop, asyncio.get_running_loop())
     audio_sender = pc.addTrack(player.audio)
     video_sender = pc.addTrack(player.video)
 
@@ -96,17 +96,17 @@ async def run(push_url, sessionid):
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer, type='answer'))
     else:
         logger.error(f"Failed to get answer from {push_url}")
-# =============================================================================
-# 路由处理函数
-# =============================================================================
 
+# =============================================================================
+# 路由处理函数 (保持不变)
+# =============================================================================
 async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
     
-    # 1. 使用 SessionManager 创建会话
     try:
         nerfreal = await session_manager.create_session(config, model_instance, avatar_instance)
+
         sessionid = nerfreal.session_id
     except Exception as e:
         logger.exception("Failed to create session")
@@ -114,7 +114,6 @@ async def offer(request):
 
     logger.info(f'New session created: {sessionid}, total sessions: {len(session_manager._sessions)}')
 
-    # WebRTC 配置
     ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[ice_server]))
     pcs.add(pc)
@@ -125,14 +124,12 @@ async def offer(request):
         if pc.connectionState in ["failed", "closed"]:
             await pc.close()
             pcs.discard(pc)
-            # 2. 使用 SessionManager 销毁会话
             await session_manager.destroy_session(sessionid)
 
-    player = HumanPlayer(nerfreal)
+    player = HumanPlayer(nerfreal, asyncio.get_running_loop())
     audio_sender = pc.addTrack(player.audio)
     video_sender = pc.addTrack(player.video)
 
-    # 编解码器偏好设置
     capabilities = RTCRtpSender.getCapabilities("video")
     preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
     preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
@@ -156,7 +153,6 @@ async def human(request):
         params = await request.json()
         sessionid = params.get('sessionid', 0)
         
-        # 使用 SessionManager 获取会话
         session = session_manager.get_session(sessionid)
         if not session:
             return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
@@ -167,18 +163,14 @@ async def human(request):
         if params['type'] == 'echo':
             session.put_msg_txt(params['text'])
         elif params['type'] == 'chat':
-            # 定义异步处理流程
             async def process_chat():
                 try:
-                    # 使用 async for 迭代异步生成器
                     async for text_segment in llm_service.chat_stream(params['text']):
                         session.put_msg_txt(text_segment)
                 except Exception as e:
                     logger.error(f"LLM chat stream error: {e}")
             
-            # 定义一个同步的包装函数，用于在 executor 中运行
             def run_async_chat():
-                # 获取当前线程的事件循环，如果没有则创建一个新的
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
@@ -186,9 +178,8 @@ async def human(request):
                 finally:
                     loop.close()
 
-            # 在线程池中运行同步包装函数
             if llm_service:
-                asyncio.get_event_loop().run_in_executor(None, run_async_chat)
+                asyncio.get_running_loop().run_in_executor(None, run_async_chat)
             else:
                 logger.error("LLM service not initialized.")
                 return web.json_response({"code": -1, "msg": "LLM service not ready"})
@@ -213,12 +204,10 @@ async def interrupt_talk(request):
         return web.json_response({"code": -1, "msg": str(e)})
 
 async def humanaudio(request):
-    """处理上传的音频文件"""
     try:
         form = await request.post()
         sessionid = int(form.get('sessionid', 0))
         fileobj = form["file"]
-        # filename = fileobj.filename # 暂时未使用
         filebytes = fileobj.file.read()
         
         session = session_manager.get_session(sessionid)
@@ -233,7 +222,6 @@ async def humanaudio(request):
         return web.json_response({"code": -1, "msg": str(e)})
 
 async def set_audiotype(request):
-    """设置自定义音频/视频状态"""
     try:
         params = await request.json()
         sessionid = params.get('sessionid', 0)
@@ -250,7 +238,6 @@ async def set_audiotype(request):
         return web.json_response({"code": -1, "msg": str(e)})
 
 async def record(request):
-    """控制录制开始/结束"""
     try:
         params = await request.json()
         sessionid = params.get('sessionid', 0)
@@ -260,7 +247,6 @@ async def record(request):
              return web.json_response({"code": -1, "msg": "Session not found"}, status=404)
 
         if params['type'] == 'start_record':
-            # 获取当前视频帧分辨率用于初始化 recorder
             if len(session.frame_list_cycle) > 0:
                 h, w, _ = session.frame_list_cycle[0].shape
                 session.recorder.set_resolution(w, h)
@@ -282,9 +268,15 @@ async def is_speaking(request):
 
 async def on_shutdown(app):
     logger.info("Shutting down server...")
+    # 关闭所有WebRTC连接
     coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros)
+    if coros:
+        await asyncio.gather(*coros)
     pcs.clear()
+    
+    # 销毁所有会话
+    for session_id in list(session_manager._sessions.keys()):
+        await session_manager.destroy_session(session_id)
 
 # =============================================================================
 # 启动逻辑
@@ -311,71 +303,40 @@ def init_model():
         avatar_instance = (ultralight_model, frames, faces, coords)
         warm_up_ultralight(config.model.batch_size, avatar_instance, 160)
 
-def main():
-    global config, llm_service
+async def async_shutdown(runner):
+    """异步清理函数"""
+    global virtualcam_quit_event, virtualcam_render_thread
     
-    # 1. 加载配置
-    config = AppConfig.from_args()
-    logger.info(f"Configuration loaded: {config}")
+    logger.info("Starting async shutdown...")
+    
+    # 如果是虚拟摄像头模式，停止渲染线程
+    if virtualcam_quit_event is not None:
+        virtualcam_quit_event.set()
+        if virtualcam_render_thread is not None:
+            virtualcam_render_thread.join(timeout=5)
+    
+    # 清理WebRTC连接
+    coros = [pc.close() for pc in pcs]
+    if coros:
+        await asyncio.gather(*coros, return_exceptions=True)
+    pcs.clear()
+    
+    # 销毁所有会话
+    for session_id in list(session_manager._sessions.keys()):
+        try:
+            await session_manager.destroy_session(session_id)
+        except Exception as e:
+            logger.error(f"Error destroying session {session_id}: {e}")
+    
+    # 清理runner
+    await runner.cleanup()
 
-    # 2. 初始化进程模式
-    mp.set_start_method('spawn')
+def run_server(runner):
+    """修改后的服务器启动函数，正确处理信号和清理"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # 3. 初始化 LLM 服务 (即使 API Key 为空也初始化，防止报错，内部会处理)
     try:
-        llm_service = create_llm_service(config)
-    except Exception as e:
-        logger.warning(f"LLM Service initialization failed: {e}")
-
-    # 4. 预加载模型
-    if config.server.transport == 'virtualcam':
-        # VirtualCam 模式：需要先加载模型，并在主线程外启动渲染
-        init_model()
-        
-        # 创建一个会话实例
-        # 注意：virtualcam 模式通常只需要一个实例，session_id 设为 0
-        logger.info("Running in VirtualCam mode...")
-        
-        # 使用 SessionManager 创建会话
-        # 这里需要在异步环境外调用，或者手动构建
-        # 为简化，我们直接构建 RenderLoop
-        # 注意：VirtualCam 模式通常不经过 WebRTC offer 流程
-        
-        # 由于 SessionManager.create_session 是 async 的，这里做个适配
-        # 或者直接调用工厂逻辑
-        config.session_id = 0
-        
-        # 选择渲染类
-        if config.model.name == 'musetalk':
-             render_cls = MuseRenderLoop
-        elif config.model.name == 'wav2lip':
-             render_cls = LipRenderLoop
-        elif config.model.name == 'ultralight':
-             render_cls = LightRenderLoop
-        else: raise ValueError("Unknown model")
-        
-        render_loop = render_cls(config, model_instance, avatar_instance)
-        
-        # 启动渲染线程
-        from threading import Event
-        thread_quit = Event()
-        # 启动 render 方法 (注意 render 方法是阻塞的，或者内部启动线程)
-        # 原 BaseReal.render 是启动线程，但我们的 RenderLoop.render 是阻塞循环
-        # 我们需要将其放在独立线程中运行
-        import threading
-        render_thread = threading.Thread(target=render_loop.render, args=(thread_quit,))
-        render_thread.daemon = True
-        render_thread.start()
-        
-        logger.info("VirtualCam render thread started.")
-        pass
-
-    else:
-        # WebRTC / RTCPush 模式：预加载模型
-        init_model()
-    def run_server(runner):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         loop.run_until_complete(runner.setup())
         site = web.TCPSite(runner, '0.0.0.0', config.server.listen_port)
         loop.run_until_complete(site.start())
@@ -386,12 +347,107 @@ def main():
                 push_url = config.server.push_url
                 if k != 0:
                     push_url = config.server.push_url + str(k)
-                # 在事件循环中启动推流任务
                 loop.run_until_complete(run(push_url, k))
-                
+        
+        # 信号处理函数
+        def signal_handler():
+            logger.info("Received shutdown signal")
+            asyncio.ensure_future(async_shutdown(runner))
+            loop.stop()
+        
+        # 注册信号处理器（Windows下可能不支持）
+        try:
+            loop.add_signal_handler(signal.SIGINT, signal_handler)
+            loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        except NotImplementedError:
+            # Windows系统下不支持add_signal_handler，使用其他方法
+            pass
+        
+        logger.info("Server started successfully, press Ctrl+C to stop")
+        
+        # 运行事件循环
         loop.run_forever()
+        
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+    finally:
+        logger.info("Cleaning up...")
+        try:
+            # 执行清理
+            loop.run_until_complete(async_shutdown(runner))
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+        finally:
+            loop.stop()
+            loop.close()
+            logger.info("Server stopped")
+
+def main():
+    global config, llm_service, virtualcam_quit_event, virtualcam_render_thread
+    
+    # 1. 加载配置
+    config = AppConfig.from_args()
+    logger.info(f"Configuration loaded: {config}")
+
+    # 2. 初始化进程模式
+    mp.set_start_method('spawn')
+    
+    # 3. 初始化 LLM 服务
+    try:
+        llm_service = create_llm_service(config)
+    except Exception as e:
+        logger.warning(f"LLM Service initialization failed: {e}")
+
+    # 4. 预加载模型
+    if config.server.transport == 'virtualcam':
+        init_model()
+        
+        logger.info("Running in VirtualCam mode...")
+        
+        config.session_id = 0
+        
+        if config.model.name == 'musetalk':
+             render_cls = MuseRenderLoop
+        elif config.model.name == 'wav2lip':
+             render_cls = LipRenderLoop
+        elif config.model.name == 'ultralight':
+             render_cls = LightRenderLoop
+        else: raise ValueError("Unknown model")
+        
+        render_loop = render_cls(config, model_instance, avatar_instance)
+        
+        from threading import Event
+        thread_quit = Event()
+        virtualcam_quit_event = thread_quit  # 保存到全局变量
+        
+        import threading
+        render_thread = threading.Thread(target=render_loop.render, args=(thread_quit,))
+        render_thread.daemon = False  # 设置为非守护线程，确保能正确等待
+        render_thread.start()
+        virtualcam_render_thread = render_thread  # 保存到全局变量
+        
+        logger.info("VirtualCam render thread started.")
+        
+        # 等待退出信号
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Received Ctrl+C, shutting down VirtualCam...")
+            thread_quit.set()
+            render_thread.join(timeout=5)
+            logger.info("VirtualCam stopped.")
+        
+        return  # 虚拟摄像头模式直接退出
+        
+    else:
+        # WebRTC / RTCPush 模式：预加载模型
+        init_model()
+    
     # 5. 构建 Web 应用
-    app = web.Application(client_max_size=1024**2 * 100) # 100MB upload limit
+    app = web.Application(client_max_size=1024**2 * 100)
     app.on_shutdown.append(on_shutdown)
 
     # 6. 注册路由
@@ -403,19 +459,48 @@ def main():
     app.router.add_post("/interrupt_talk", interrupt_talk)
     app.router.add_post("/is_speaking", is_speaking)
     
-    # 静态文件目录
     app.router.add_static('/', path='web')
 
-    # 7. CORS 配置
-    cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-        )
-    })
+    # 7. CORS 配置：智能放行局域网访问
+    def allow_local_network(origin: str) -> bool:
+        """
+        判断请求的 Origin 是否属于局域网/本地回环
+        返回 True 则允许跨域，False 则拒绝
+        """
+        if not origin:
+            return False
+            
+        # 提取 Origin 中的主机名（去掉 http:// 协议和端口）
+        origin_host = origin.split("://")[-1].split("/")[0].split(":")[0]
+        
+        # 放行本地回环地址
+        if origin_host in ["localhost", "127.0.0.1", "::1"]:
+            return True
+            
+        try:
+            # 尝试解析为 IP 地址，判断是否属于私有网段 (192.168.x.x, 10.x.x.x 等)
+            ip = ipaddress.ip_address(origin_host)
+            return ip.is_private
+        except ValueError:
+            # 如果解析失败说明是域名。在开发阶段，如果是内网域名也可以选择放行。
+            # 这里为了方便局域网开发直接返回 True。如果需要严格限制，可以改为 return False
+            return True
+
+    # 初始化 CORS（不使用 defaults 全局通配，而是针对每个路由精确配置）
+    cors = aiohttp_cors.setup(app)
+    
+    # 遍历所有已注册的路由，应用基于函数的 CORS 策略
     for route in list(app.router.routes()):
-        cors.add(route)
+        cors.add(
+            route, 
+            {
+                allow_local_network: aiohttp_cors.ResourceOptions(
+                    allow_credentials=True,  # 局域网内安全，允许携带凭证
+                    expose_headers="*",
+                    allow_headers="*",
+                )
+            }
+        )
 
     # 8. 启动服务
     pagename = 'webrtcapi.html'
