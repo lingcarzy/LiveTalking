@@ -383,7 +383,54 @@ def run_server(runner):
             loop.stop()
             loop.close()
             logger.info("Server stopped")
+# =============================================================================
+# 自定义 CORS 中间件：智能放行局域网，拒绝公网
+# =============================================================================
+def is_local_origin(origin: str) -> bool:
+    """判断请求来源是否属于内网或本地"""
+    if not origin:
+        return False
+        
+    origin_host = origin.split("://")[-1].split("/")[0].split(":")[0]
+    
+    if origin_host in ["localhost", "127.0.0.1", "::1"]:
+        return True
+        
+    try:
+        ip = ipaddress.ip_address(origin_host)
+        return ip.is_private
+    except ValueError:
+        # 解析失败说明是域名（如内网配置的 domain.local），开发环境直接放行
+        return True
 
+@web.middleware
+async def localCors_middleware(request, handler):
+    # 1. 拦截预检请求 (OPTIONS)
+    if request.method == 'OPTIONS':
+        origin = request.headers.get('Origin')
+        if is_local_origin(origin):
+            return web.Response(
+                status=204,
+                headers={
+                    'Access-Control-Allow-Origin': origin,
+                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                    'Access-Control-Allow-Headers': '*',  # 允许所有请求头
+                    'Access-Control-Allow-Credentials': 'true',
+                    'Access-Control-Max-Age': '86400',   # 预检缓存1天
+                }
+            )
+        return web.Response(status=403)  # 非内网来源直接拒绝预检
+
+    # 2. 处理正常业务请求
+    response = await handler(request)
+    
+    origin = request.headers.get('Origin')
+    if is_local_origin(origin):
+        # 注意：这里必须返回具体的 Origin 字符串，绝对不能返回 "*"，否则浏览器会拒绝
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        
+    return response
 def main():
     global config, llm_service, virtualcam_quit_event, virtualcam_render_thread
     
@@ -446,8 +493,9 @@ def main():
         # WebRTC / RTCPush 模式：预加载模型
         init_model()
     
-    # 5. 构建 Web 应用
-    app = web.Application(client_max_size=1024**2 * 100)
+    # 5. 构建 Web 应用 (注入自定义中间件)
+    middlewares = [localCors_middleware] # 刚才定义的中间件名
+    app = web.Application(client_max_size=1024**2 * 100, middlewares=middlewares)
     app.on_shutdown.append(on_shutdown)
 
     # 6. 注册路由
@@ -461,48 +509,7 @@ def main():
     
     app.router.add_static('/', path='web')
 
-    # 7. CORS 配置：智能放行局域网访问
-    def allow_local_network(origin: str) -> bool:
-        """
-        判断请求的 Origin 是否属于局域网/本地回环
-        返回 True 则允许跨域，False 则拒绝
-        """
-        if not origin:
-            return False
-            
-        # 提取 Origin 中的主机名（去掉 http:// 协议和端口）
-        origin_host = origin.split("://")[-1].split("/")[0].split(":")[0]
-        
-        # 放行本地回环地址
-        if origin_host in ["localhost", "127.0.0.1", "::1"]:
-            return True
-            
-        try:
-            # 尝试解析为 IP 地址，判断是否属于私有网段 (192.168.x.x, 10.x.x.x 等)
-            ip = ipaddress.ip_address(origin_host)
-            return ip.is_private
-        except ValueError:
-            # 如果解析失败说明是域名。在开发阶段，如果是内网域名也可以选择放行。
-            # 这里为了方便局域网开发直接返回 True。如果需要严格限制，可以改为 return False
-            return True
-
-    # 初始化 CORS（不使用 defaults 全局通配，而是针对每个路由精确配置）
-    cors = aiohttp_cors.setup(app)
-    
-    # 遍历所有已注册的路由，应用基于函数的 CORS 策略
-    for route in list(app.router.routes()):
-        cors.add(
-            route, 
-            {
-                allow_local_network: aiohttp_cors.ResourceOptions(
-                    allow_credentials=True,  # 局域网内安全，允许携带凭证
-                    expose_headers="*",
-                    allow_headers="*",
-                )
-            }
-        )
-
-    # 8. 启动服务
+    # 7. 启动服务
     pagename = 'webrtcapi.html'
     if config.server.transport == 'rtmp':
         pagename = 'echoapi.html'
