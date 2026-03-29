@@ -87,12 +87,27 @@ class MediaRecorder:
 
         # 合并音视频
         output_path = f"data/record_{self.session_id}.mp4"
-        cmd_combine = (
-            f"ffmpeg -y -i temp_{self.session_id}.aac -i temp_{self.session_id}.mp4 "
-            f"-c:v copy -c:a copy {output_path}"
-        )
-        os.system(cmd_combine)
-        logger.info(f"Recording saved to {output_path}")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", 
+                    "-i", f"temp_{self.session_id}.aac", 
+                    "-i", f"temp_{self.session_id}.mp4", 
+                    "-c:v", "copy", "-c:a", "copy", 
+                    output_path
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            logger.info(f"Recording saved to {output_path}")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to merge recording: {e}")
+        finally:
+            # 清理临时文件
+            for temp_file in [f"temp_{self.session_id}.aac", f"temp_{self.session_id}.mp4"]:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
 
     def __del__(self):
         if self.is_recording:
