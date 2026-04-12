@@ -4,6 +4,7 @@
 
 import asyncio
 import uuid
+import time
 from typing import Dict, Optional
 from utils.logger import logger
 from avatars.base_avatar import BaseAvatar
@@ -59,10 +60,12 @@ class SessionManager:
         self.sessions[sessionid] = None
 
         # 在线程池中构建 session（加载模型非常耗时）
+        build_start = time.perf_counter()
         avatar_session = await asyncio.get_event_loop().run_in_executor(
             None, self.build_session_fn, sessionid, params
         )
         self.sessions[sessionid] = avatar_session
+        logger.info('session build done sessionid=%s elapsed=%.3fs', sessionid, time.perf_counter() - build_start)
         return sessionid
         
     def add_session(self, sessionid: str, avatar_session: BaseAvatar):

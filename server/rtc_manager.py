@@ -6,6 +6,7 @@ import json
 import asyncio
 import random
 import copy
+import time
 from typing import Dict, Optional
 import queue
 
@@ -40,6 +41,7 @@ class RTCManager:
 
     async def handle_offer(self, request):
         """处理 WebRTC offer 信令"""
+        offer_start = time.perf_counter()
         params = await request.json()
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
@@ -58,10 +60,14 @@ class RTCManager:
         avatar_session = session_manager.get_session(sessionid)
 
         # 创建 PeerConnection
-        ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
-        pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=[ice_server])
-        )
+        ice_urls = [u.strip() for u in str(getattr(self.opt, 'ice_server_urls', '')).split(',') if u.strip()]
+        if ice_urls:
+            ice_servers = [RTCIceServer(urls=u) for u in ice_urls]
+            pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
+            logger.info('offer using ICE servers: %s', ice_urls)
+        else:
+            pc = RTCPeerConnection()
+            logger.info('offer using no ICE server (LAN/local mode)')
         self.pcs.add(pc)
 
         @pc.on("connectionstatechange")
@@ -90,6 +96,7 @@ class RTCManager:
 
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
+        logger.info('offer done sessionid=%s elapsed=%.3fs', sessionid, time.perf_counter() - offer_start)
 
         return web.Response(
             content_type="application/json",

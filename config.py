@@ -7,6 +7,12 @@ import json
 import os
 
 
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ('1', 'true', 'yes', 'on')
+
+
 def load_env_file(env_file: str = ".env"):
     """Load KEY=VALUE pairs from .env without overriding existing environment variables."""
     env_path = os.path.join(os.path.dirname(__file__), env_file)
@@ -117,6 +123,11 @@ def parse_args():
     parser.add_argument('--max_session', type=int, default=1)
     parser.add_argument('--listenport', type=int, default=8010,
                         help="web listen port")
+    parser.add_argument('--ice_server_urls', type=str, default=os.getenv('ICE_SERVER_URLS', ''),
+                        help="comma-separated ICE urls, empty disables STUN/TURN")
+    parser.add_argument('--skip_model_warmup', type=str_to_bool,
+                        default=str_to_bool(os.getenv('SKIP_MODEL_WARMUP', 'true')),
+                        help="skip startup warmup to reduce launch time")
 
     opt = parser.parse_args()
 
