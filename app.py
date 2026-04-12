@@ -103,7 +103,12 @@ def build_avatar_session(sessionid:str, params:dict)->BaseAvatar:
         opt_this.REF_TEXT = ref_text
     custom_config=params.get('custom_config','') #动作编排配置
     if custom_config:
-        opt_this.customopt = json.loads(custom_config)
+        if len(custom_config) > opt.max_custom_config_chars:
+            raise ValueError("custom_config too large")
+        try:
+            opt_this.customopt = json.loads(custom_config)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid custom_config json: {e}")
 
     avatar_session = registry.create("avatar", opt.model, opt=opt_this, model=model, avatar=avatar_this)
     return avatar_session
@@ -164,6 +169,8 @@ def main():
     #############################################################################
     appasync = web.Application(client_max_size=1024**2*100)
     appasync["llm_response"] = llm_response
+    appasync["max_chat_chars"] = opt.max_chat_chars
+    appasync["max_audio_upload_bytes"] = opt.max_audio_upload_mb * 1024 * 1024
 
     appasync.on_shutdown.append(on_shutdown)
     appasync.router.add_post("/offer", offer)

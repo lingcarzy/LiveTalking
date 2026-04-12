@@ -7,6 +7,33 @@ import json
 import os
 
 
+def load_env_file(env_file: str = ".env"):
+    """Load KEY=VALUE pairs from .env without overriding existing environment variables."""
+    env_path = os.path.join(os.path.dirname(__file__), env_file)
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+
+            # Support inline comments like: FOO=bar  # comment
+            if value and value[0] in ("'", '"') and value[-1:] == value[0]:
+                value = value[1:-1]
+            else:
+                value = value.split(" #", 1)[0].rstrip()
+
+            os.environ.setdefault(key, value)
+
+
 def str_or_int(value):
     """尝试转换为 int，失败则返回 str"""
     try:
@@ -17,6 +44,7 @@ def str_or_int(value):
 
 def parse_args():
     """解析命令行参数"""
+    load_env_file(".env")
     parser = argparse.ArgumentParser(description="LiveTalking Digital Human Server")
 
     # ─── 音频 ──────────────────────────────────────────────────────────
@@ -50,6 +78,37 @@ def parse_args():
     parser.add_argument('--REF_TEXT', type=str, default=None)
     parser.add_argument('--TTS_SERVER', type=str, default='http://127.0.0.1:9880')
 
+    # ─── LLM ───────────────────────────────────────────────────────────
+    parser.add_argument('--llm_provider', type=str,
+                        default=os.getenv('LLM_PROVIDER', os.getenv('LIVETALKING_LLM_PROVIDER', 'grok')),
+                        help="llm provider: dashscope/grok/deepseek/ollama/openai")
+    parser.add_argument('--llm_model', type=str, default=os.getenv('LLM_MODEL', ''),
+                        help="llm model name, empty uses provider default")
+    parser.add_argument('--llm_api_key', type=str,
+                        default=os.getenv('LLM_API_KEY', os.getenv('LIVETALKING_LLM_API_KEY', '')),
+                        help="llm api key, empty uses provider env var")
+    parser.add_argument('--llm_base_url', type=str,
+                        default=os.getenv('LLM_BASE_URL', os.getenv('LIVETALKING_LLM_BASE_URL', '')),
+                        help="llm base url, empty uses provider default")
+    parser.add_argument('--llm_proxy', type=str,
+                        default=os.getenv('LLM_PROXY', os.getenv('GROK_PROXY', '')),
+                        help="optional proxy url for llm requests")
+    parser.add_argument('--llm_system_prompt', type=str,
+                        default=os.getenv('LLM_SYSTEM_PROMPT', '你是一个知识助手，尽量以简短、口语化的方式输出'),
+                        help="llm system prompt")
+    parser.add_argument('--llm_history_turns', type=int, default=int(os.getenv('LLM_HISTORY_TURNS', '6')),
+                        help="number of recent conversation turns to keep")
+    parser.add_argument('--llm_request_timeout', type=float, default=float(os.getenv('LLM_REQUEST_TIMEOUT', '60')),
+                        help="llm request timeout seconds")
+
+    # ─── 安全/性能限制 ─────────────────────────────────────────────────
+    parser.add_argument('--max_chat_chars', type=int, default=int(os.getenv('MAX_CHAT_CHARS', '4000')),
+                        help="max chars for /human text")
+    parser.add_argument('--max_audio_upload_mb', type=int, default=int(os.getenv('MAX_AUDIO_UPLOAD_MB', '20')),
+                        help="max upload size for /humanaudio in MB")
+    parser.add_argument('--max_custom_config_chars', type=int, default=int(os.getenv('MAX_CUSTOM_CONFIG_CHARS', '50000')),
+                        help="max chars for custom_config json payload")
+
     # ─── 传输 ─────────────────────────────────────────────────────────
     parser.add_argument('--transport', type=str, default='webrtc',
                         help="output: rtcpush/webrtc/rtmp/virtualcam")
@@ -66,5 +125,12 @@ def parse_args():
     if opt.customvideo_config:
         with open(opt.customvideo_config, 'r') as f:
             opt.customopt = json.load(f)
+
+    if opt.max_chat_chars < 1:
+        opt.max_chat_chars = 1
+    if opt.max_audio_upload_mb < 1:
+        opt.max_audio_upload_mb = 1
+    if opt.max_custom_config_chars < 100:
+        opt.max_custom_config_chars = 100
 
     return opt

@@ -53,17 +53,31 @@ async def human(request):
         if params.get('interrupt'):
             avatar_session.flush_talk()
 
-        datainfo = {}
-        if params.get('tts'):  # tts 参数透传（voice, emotion 等）
-            datainfo['tts'] = params.get('tts')
+        msg_type = params.get('type')
+        if msg_type not in ('echo', 'chat'):
+            return json_error("invalid type")
 
-        if params['type'] == 'echo':
-            avatar_session.put_msg_txt(params['text'], datainfo)
-        elif params['type'] == 'chat':
+        text = str(params.get('text', '')).strip()
+        max_chat_chars = int(request.app.get('max_chat_chars', 4000))
+        if not text:
+            return json_error("text is required")
+        if len(text) > max_chat_chars:
+            return json_error(f"text too long, max {max_chat_chars} chars")
+
+        datainfo = {}
+        tts_info = params.get('tts')
+        if tts_info is not None:
+            if not isinstance(tts_info, dict):
+                return json_error("tts must be an object")
+            datainfo['tts'] = tts_info
+
+        if msg_type == 'echo':
+            avatar_session.put_msg_txt(text, datainfo)
+        elif msg_type == 'chat':
             llm_response = request.app.get("llm_response")
             if llm_response:
                 asyncio.get_event_loop().run_in_executor(
-                    None, llm_response, params['text'], avatar_session, datainfo
+                    None, llm_response, text, avatar_session, datainfo
                 )
 
         return json_ok()
@@ -94,6 +108,9 @@ async def humanaudio(request):
         sessionid = str(form.get('sessionid', ''))
         fileobj = form["file"]
         filebytes = fileobj.file.read()
+        max_audio_upload_bytes = int(request.app.get('max_audio_upload_bytes', 20 * 1024 * 1024))
+        if len(filebytes) > max_audio_upload_bytes:
+            return json_error(f"audio too large, max {max_audio_upload_bytes // (1024 * 1024)}MB")
 
         datainfo = {}
 
@@ -115,7 +132,7 @@ async def set_audiotype(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
-        avatar_session.set_custom_state(params['audiotype'])
+        avatar_session.set_custom_state(params['audiotype'], params.get('reinit', True))
         return json_ok()
     except Exception as e:
         logger.exception('set_audiotype exception:')
