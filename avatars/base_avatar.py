@@ -479,18 +479,16 @@ class BaseAvatar:
         process_thread = Thread(target=self.process_frames, args=(process_quit_event,))
         process_thread.start()
 
-        count=0
-        totaltime=0
-        _starttime=time.perf_counter()
-        _totalframe=0
         while not quit_event.is_set(): 
-            t = time.perf_counter()
             self.asr.run_step()
 
             buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
             if buffer_size >= 5:
                 logger.debug('sleep qsize=%d', buffer_size)
                 time.sleep(0.04 * buffer_size * 0.8)
+            else:
+                # Yield CPU briefly to avoid busy-looping when workload is light.
+                time.sleep(0.001)
         logger.info('baseavatar render thread stop')
 
         infer_quit_event.set()
@@ -498,4 +496,26 @@ class BaseAvatar:
 
         process_quit_event.set()
         process_thread.join()
+
+    def shutdown(self):
+        """Best-effort resource cleanup for session lifecycle management."""
+        try:
+            self.flush_talk()
+        except Exception:
+            logger.exception('flush_talk during shutdown failed')
+
+        if getattr(self, 'quit_event', None) is not None:
+            self.quit_event.set()
+
+        if self.recording:
+            try:
+                self.stop_recording()
+            except Exception:
+                logger.exception('stop_recording during shutdown failed')
+
+        if hasattr(self, 'output') and self.output is not None:
+            try:
+                self.output.stop()
+            except Exception:
+                logger.exception('output stop during shutdown failed')
 

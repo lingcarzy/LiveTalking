@@ -126,12 +126,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         #         else:
         #             frame = await self._queue.get()
         #     else:
-        while True:
-            try:
-                frame, eventpoint = self._queue.get_nowait()
-                break
-            except queue.Empty:
-                await asyncio.sleep(0.005)
+        frame, eventpoint = await asyncio.to_thread(self._queue.get)
                 
         pts, time_base = await self.next_timestamp()
         frame.pts = pts
@@ -187,17 +182,30 @@ class HumanPlayer:
         if hasattr(self.__container, 'output'):
             self.__container.output._player = self
 
+    @staticmethod
+    def _push_with_drop(q: queue.Queue, item) -> None:
+        """Keep real-time behavior by dropping oldest frame when the queue is full."""
+        while True:
+            try:
+                q.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    return
+
     def push_video(self, frame):
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        self.__video._queue.put((new_frame, None))
+        self._push_with_drop(self.__video._queue, (new_frame, None))
 
     def push_audio(self, frame, eventpoint=None):
         from av import AudioFrame
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
         new_frame.planes[0].update(frame.tobytes())
         new_frame.sample_rate = 16000
-        self.__audio._queue.put((new_frame, eventpoint))
+        self._push_with_drop(self.__audio._queue, (new_frame, eventpoint))
 
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()

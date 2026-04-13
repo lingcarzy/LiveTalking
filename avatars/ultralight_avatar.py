@@ -19,42 +19,21 @@
 #  使用 HubertASR 音频特征提取（与 wav2lipls 共享）
 #
 
-import math
 import torch
 import numpy as np
 
-import os
-import time
 import cv2
-import glob
-import pickle
 import copy
 
-import queue
-from queue import Queue
-from threading import Thread, Event
-import torch.multiprocessing as mp
-
 from avatars.audio_features.hubert import HubertASR
-import asyncio
-from av import AudioFrame, VideoFrame
 from avatars.base_avatar import BaseAvatar
-
-from tqdm import tqdm
-
-import torch.nn as nn
-from torch import optim
-from transformers import Wav2Vec2Processor, HubertModel
-from torch.utils.data import DataLoader
 from avatars.ultralight.unet import Model
 from avatars.ultralight.audio2feature import Audio2Feature
+from avatars.avatar_utils import get_avatar_path, get_inference_device, get_mirror_batch_indices, load_pickle_file, load_sorted_images, load_torch_file, warm_up_avatar_model
 from utils.logger import logger
-from utils.image import read_imgs, mirror_index
-from utils.device import initialize_device
 from registry import register
 
-device = initialize_device()
-logger.info('Using {} for inference.'.format(device))
+device = get_inference_device()
 
 def load_model(opt):
     audio_processor = Audio2Feature()
@@ -62,33 +41,32 @@ def load_model(opt):
     return audio_processor,model
 
 def load_avatar(avatar_id):
-    avatar_path = f"./data/avatars/{avatar_id}"
+    avatar_path = get_avatar_path(avatar_id)
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
     coords_path = f"{avatar_path}/coords.pkl" 
     
     model = Model(6, 'hubert').to(device)
-    model.load_state_dict(torch.load(f"{avatar_path}/ultralight.pth"))
-    
-    with open(coords_path, 'rb') as f:
-        coord_list_cycle = pickle.load(f)
-    input_img_list = glob.glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
-    input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    frame_list_cycle = read_imgs(input_img_list)
-    input_face_list = glob.glob(os.path.join(face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
-    input_face_list = sorted(input_face_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    face_list_cycle = read_imgs(input_face_list)
+    model.load_state_dict(load_torch_file(f"{avatar_path}/ultralight.pth"))
+
+    coord_list_cycle = load_pickle_file(coords_path)
+    frame_list_cycle = load_sorted_images(full_imgs_path)
+    face_list_cycle = load_sorted_images(face_imgs_path)
 
     return model.eval(),frame_list_cycle,face_list_cycle,coord_list_cycle
 
 
 @torch.no_grad()
 def warm_up(batch_size,avatar,modelres):
-    logger.info('warmup model...')
     model,_,_,_ = avatar
-    img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
-    mel_batch = torch.ones(batch_size, 16, 32, 32).to(device)
-    model(img_batch, mel_batch)
+
+    def build_inputs():
+        return (
+            torch.ones(batch_size, 6, modelres, modelres).to(device),
+            torch.ones(batch_size, 16, 32, 32).to(device),
+        )
+
+    warm_up_avatar_model(build_inputs, model)
 
 # def get_audio_features(features, index):
 #     left = index - 8
@@ -147,27 +125,24 @@ class LightReal(BaseAvatar):
         length = len(self.face_list_cycle)
         img_batch = []
 
-        for i in range(self.batch_size):
-            idx = mirror_index(length, index + i)
+        for idx in get_mirror_batch_indices(length, index, self.batch_size):
             crop_img = self.face_list_cycle[idx]
             img_real_ex = crop_img[4:164, 4:164].copy()
             img_real_ex_ori = img_real_ex.copy()
             img_masked = cv2.rectangle(img_real_ex_ori,(5,5,150,145),(0,0,0),-1)
 
-            img_masked = img_masked.transpose(2,0,1).astype(np.float32)
-            img_real_ex = img_real_ex.transpose(2,0,1).astype(np.float32)
+            img_masked = img_masked.transpose(2,0,1).astype(np.float32) / 255.0
+            img_real_ex = img_real_ex.transpose(2,0,1).astype(np.float32) / 255.0
+            img_batch.append(np.concatenate([img_real_ex, img_masked], axis=0))
 
-            img_real_ex_T = torch.from_numpy(img_real_ex / 255.0)
-            img_masked_T = torch.from_numpy(img_masked / 255.0)
-            img_concat_T = torch.cat([img_real_ex_T, img_masked_T], axis=0)[None]
-            img_batch.append(img_concat_T)
+        reshaped_audiofeat_batch = np.stack([arr.reshape(16, 32, 32) for arr in audiofeat_batch]).astype(np.float32)
+        img_batch_np = np.stack(img_batch).astype(np.float32)
 
-        reshaped_audiofeat_batch = [arr.reshape(16, 32, 32) for arr in audiofeat_batch]
-        audiofeat_batch = torch.stack([torch.from_numpy(arr) for arr in reshaped_audiofeat_batch])
-        img_batch = torch.stack(img_batch).squeeze(1)
+        audiofeat_batch = torch.from_numpy(reshaped_audiofeat_batch).to(device=device, non_blocking=True)
+        img_batch = torch.from_numpy(img_batch_np).to(device=device, non_blocking=True)
 
         with torch.no_grad():
-            pred = self.model(img_batch.cuda(), audiofeat_batch.cuda())
+            pred = self.model(img_batch, audiofeat_batch)
         pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
         return pred
     

@@ -38,7 +38,7 @@ from server.webrtc import HumanPlayer
 from avatars.base_avatar import BaseAvatar
 from llm import llm_response
 import registry
-from server.routes import setup_routes
+from server.routes import setup_routes, LLM_EXECUTOR
 from server.rtc_manager import RTCManager
 from server.session_manager import session_manager
 
@@ -118,6 +118,7 @@ async def offer(request):
 
 async def on_shutdown(app):
     await rtc_manager.shutdown()
+    LLM_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 

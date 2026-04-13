@@ -38,7 +38,7 @@ class MelASR(BaseASR):
             audioframe = self.get_audio_frame()
             self.frames.append(audioframe.data)
             # put to output
-            self.output_queue.put(audioframe)
+            self._put_with_drop_oldest(self.output_queue, audioframe)
         # context not enough, do not run network.
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return
@@ -61,7 +61,7 @@ class MelASR(BaseASR):
             else:
                 mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
             i += 1
-        self.feat_queue.put(mel_chunks)
+        self._put_with_drop_oldest(self.feat_queue, mel_chunks)
         
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

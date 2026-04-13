@@ -34,8 +34,8 @@ class BaseASR:
         self.fps = opt.fps # 20 ms per frame
         self.sample_rate = 16000
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
-        self.queue:Queue[AudioFrameData] = Queue()
-        self.output_queue:Queue[AudioFrameData] = Queue()
+        self.queue:Queue[AudioFrameData] = Queue(maxsize=max(8, opt.batch_size * 8))
+        self.output_queue:Queue[AudioFrameData] = Queue(maxsize=max(16, opt.batch_size * 12))
 
         self.batch_size = opt.batch_size
 
@@ -48,10 +48,32 @@ class BaseASR:
         #self.warm_up()
 
     def flush_talk(self):
-        self.queue.queue.clear()
+        self._drain_queue(self.queue)
+        self._drain_queue(self.output_queue)
+        self._drain_queue(self.feat_queue)
+
+    @staticmethod
+    def _drain_queue(q: Queue):
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+    @staticmethod
+    def _put_with_drop_oldest(q: Queue, item):
+        while True:
+            try:
+                q.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    return
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
-        self.queue.put(AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
+        self._put_with_drop_oldest(self.queue, AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
 
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio
     def get_audio_frame(self)->AudioFrameData:        
@@ -61,7 +83,7 @@ class BaseASR:
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
             else:
-                frame = self.queue.get(block=True,timeout=0.01)
+                frame = self.queue.get(block=True,timeout=0.05)
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
@@ -77,9 +99,12 @@ class BaseASR:
         for _ in range(self.stride_left_size + self.stride_right_size):
             audio_frame=self.get_audio_frame()
             self.frames.append(audio_frame.data)
-            self.output_queue.put(audio_frame)
+            self._put_with_drop_oldest(self.output_queue, audio_frame)
         for _ in range(self.stride_left_size):
-            self.output_queue.get()
+            try:
+                self.output_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def run_step(self):
         pass

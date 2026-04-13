@@ -122,6 +122,7 @@ class RTCManager:
             if pc.connectionState == "failed":
                 await pc.close()
                 self.pcs.discard(pc)
+                session_manager.remove_session(sessionid)
 
         from server.webrtc import HumanPlayer
         player = HumanPlayer(avatar_session)

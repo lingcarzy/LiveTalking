@@ -18,42 +18,23 @@
 #  MuseTalk 数字人 — 迁移自 musereal.py + museasr.py
 #
 
-import math
 import torch
 import numpy as np
 
-import subprocess
-import os
-import time
-import torch.nn.functional as F
 import cv2
-import glob
-import pickle
 import copy
 
-import queue
-from queue import Queue
-from threading import Thread, Event
-import torch.multiprocessing as mp
-
-from avatars.musetalk.utils.utils import get_file_type,get_video_fps,datagen
 from avatars.musetalk.myutil import get_image_blending
 from avatars.musetalk.utils.utils import load_all_model
 from avatars.musetalk.whisper.audio2feature import Audio2Feature
 
 from avatars.audio_features.whisper import WhisperASR
-import asyncio
-from av import AudioFrame, VideoFrame
 from avatars.base_avatar import BaseAvatar
 
-from tqdm import tqdm
-from utils.logger import logger
-from utils.image import read_imgs, mirror_index
-from utils.device import initialize_device
+from avatars.avatar_utils import get_avatar_path, get_inference_device, get_mirror_batch_indices, load_pickle_file, load_sorted_images, load_torch_file, warm_up_avatar_model
 from registry import register
 
-device = initialize_device()
-logger.info('Using {} for inference.'.format(device))
+device = get_inference_device()
 
 def load_model():
     # load model weights
@@ -68,7 +49,7 @@ def load_model():
     return vae, unet, pe, timesteps, audio_processor
 
 def load_avatar(avatar_id):
-    avatar_path = f"./data/avatars/{avatar_id}"
+    avatar_path = get_avatar_path(avatar_id)
     full_imgs_path = f"{avatar_path}/full_imgs" 
     coords_path = f"{avatar_path}/coords.pkl"
     latents_out_path= f"{avatar_path}/latents.pt"
@@ -77,36 +58,34 @@ def load_avatar(avatar_id):
     mask_coords_path =f"{avatar_path}/mask_coords.pkl"
     avatar_info_path = f"{avatar_path}/avator_info.json"
 
-    input_latent_list_cycle = torch.load(latents_out_path)
-    with open(coords_path, 'rb') as f:
-        coord_list_cycle = pickle.load(f)
-    frame_list_cycle = None
-    input_img_list = glob.glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
-    input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    frame_list_cycle = read_imgs(input_img_list)
-    with open(mask_coords_path, 'rb') as f:
-        mask_coords_list_cycle = pickle.load(f)
-    input_mask_list = glob.glob(os.path.join(mask_out_path, '*.[jpJP][pnPN]*[gG]'))
-    input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    mask_list_cycle = read_imgs(input_mask_list)
+    input_latent_list_cycle = load_torch_file(latents_out_path)
+    coord_list_cycle = load_pickle_file(coords_path)
+    frame_list_cycle = load_sorted_images(full_imgs_path)
+    mask_coords_list_cycle = load_pickle_file(mask_coords_path)
+    mask_list_cycle = load_sorted_images(mask_out_path)
     return frame_list_cycle,mask_list_cycle,coord_list_cycle,mask_coords_list_cycle,input_latent_list_cycle
 
 @torch.no_grad()
 def warm_up(batch_size,model):
-    # 预热函数
-    print('warmup model...')
     vae, unet, pe, timesteps, audio_processor = model
-    whisper_batch = np.ones((batch_size, 50, 384), dtype=np.uint8)
-    latent_batch = torch.ones(batch_size, 8, 32, 32).to(unet.device)
 
-    audio_feature_batch = torch.from_numpy(whisper_batch)
-    audio_feature_batch = audio_feature_batch.to(device=unet.device, dtype=unet.model.dtype)
-    audio_feature_batch = pe(audio_feature_batch)
-    latent_batch = latent_batch.to(dtype=unet.model.dtype)
-    pred_latents = unet.model(latent_batch,
-                              timesteps,
-                              encoder_hidden_states=audio_feature_batch).sample
-    vae.decode_latents(pred_latents)    
+    def build_inputs():
+        whisper_batch = torch.from_numpy(np.ones((batch_size, 50, 384), dtype=np.uint8))
+        latent_batch = torch.ones(batch_size, 8, 32, 32).to(unet.device)
+        audio_feature_batch = whisper_batch.to(device=unet.device, dtype=unet.model.dtype)
+        audio_feature_batch = pe(audio_feature_batch)
+        latent_batch = latent_batch.to(dtype=unet.model.dtype)
+        return latent_batch, audio_feature_batch
+
+    def run_forward(latent_batch, audio_feature_batch):
+        pred_latents = unet.model(
+            latent_batch,
+            timesteps,
+            encoder_hidden_states=audio_feature_batch,
+        ).sample
+        vae.decode_latents(pred_latents)
+
+    warm_up_avatar_model(build_inputs, run_forward)
 
 @register("avatar", "musetalk")
 class MuseReal(BaseAvatar):
@@ -133,16 +112,11 @@ class MuseReal(BaseAvatar):
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
         length = len(self.input_latent_list_cycle)
         whisper_batch = np.stack(audiofeat_batch)
-        latent_batch = []
-        for i in range(self.batch_size):
-            idx = mirror_index(length, index + i)
-            latent = self.input_latent_list_cycle[idx]
-            latent_batch.append(latent)
-        latent_batch = torch.cat(latent_batch, dim=0)
+        batch_indices = get_mirror_batch_indices(length, index, self.batch_size)
+        latent_batch = torch.cat([self.input_latent_list_cycle[idx] for idx in batch_indices], dim=0)
         
         audio_feature_batch = torch.from_numpy(whisper_batch)
-        audio_feature_batch = audio_feature_batch.to(device=self.unet.device,
-                                                        dtype=self.unet.model.dtype)
+        audio_feature_batch = audio_feature_batch.to(device=self.unet.device, dtype=self.unet.model.dtype)
         audio_feature_batch = self.pe(audio_feature_batch)
         latent_batch = latent_batch.to(dtype=self.unet.model.dtype)
 

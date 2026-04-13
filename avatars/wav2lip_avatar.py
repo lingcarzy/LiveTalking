@@ -18,44 +18,26 @@
 #  Wav2Lip 数字人 — 迁移自 lipreal.py + lipasr.py
 #
 
-import math
 import torch
 import numpy as np
 
-import os
-import time
 import cv2
-import glob
-import pickle
 import copy
 
-import queue
-from queue import Queue
-from threading import Thread, Event
-import torch.multiprocessing as mp
-
 from avatars.audio_features.mel import MelASR
-import asyncio
-from av import AudioFrame, VideoFrame
 from avatars.wav2lip.models import Wav2Lip
 from avatars.base_avatar import BaseAvatar
 
-from tqdm import tqdm
+from avatars.avatar_utils import get_avatar_path, get_inference_device, get_mirror_batch_indices, load_pickle_file, load_sorted_images, load_torch_file, warm_up_avatar_model
 from utils.logger import logger
-from utils.image import read_imgs, mirror_index
-from utils.device import initialize_device
 from registry import register
 
-device = initialize_device()
-logger.info('Using {} for inference.'.format(device))
+device = get_inference_device()
 
 def _load(checkpoint_path):
     if device == 'cuda':
-        checkpoint = torch.load(checkpoint_path)
-    else:
-        checkpoint = torch.load(checkpoint_path,
-                                map_location=lambda storage, loc: storage)
-    return checkpoint
+        return load_torch_file(checkpoint_path)
+    return load_torch_file(checkpoint_path, map_location=lambda storage, loc: storage)
 
 def load_model(path):
     model = Wav2Lip()
@@ -71,30 +53,26 @@ def load_model(path):
     return model.eval()
 
 def load_avatar(avatar_id):
-    avatar_path = f"./data/avatars/{avatar_id}"
+    avatar_path = get_avatar_path(avatar_id)
     full_imgs_path = f"{avatar_path}/full_imgs" 
     face_imgs_path = f"{avatar_path}/face_imgs" 
     coords_path = f"{avatar_path}/coords.pkl"
-    
-    with open(coords_path, 'rb') as f:
-        coord_list_cycle = pickle.load(f)
-    frame_list_cycle = None
-    input_img_list = glob.glob(os.path.join(full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
-    input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    frame_list_cycle = read_imgs(input_img_list)
-    input_face_list = glob.glob(os.path.join(face_imgs_path, '*.[jpJP][pnPN]*[gG]'))
-    input_face_list = sorted(input_face_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-    face_list_cycle = read_imgs(input_face_list)
+
+    coord_list_cycle = load_pickle_file(coords_path)
+    frame_list_cycle = load_sorted_images(full_imgs_path)
+    face_list_cycle = load_sorted_images(face_imgs_path)
 
     return frame_list_cycle,face_list_cycle,coord_list_cycle
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
-    # 预热函数
-    logger.info('warmup model...')
-    img_batch = torch.ones(batch_size, 6, modelres, modelres).to(device)
-    mel_batch = torch.ones(batch_size, 1, 80, 16).to(device)
-    model(mel_batch, img_batch)
+    def build_inputs():
+        return (
+            torch.ones(batch_size, 1, 80, 16).to(device),
+            torch.ones(batch_size, 6, modelres, modelres).to(device),
+        )
+
+    warm_up_avatar_model(build_inputs, model)
 
 @register("avatar", "wav2lip")
 class LipReal(BaseAvatar):
@@ -118,12 +96,10 @@ class LipReal(BaseAvatar):
         # 这里的 index 是针对当前 avatar 的索引
         # 返回一个 batch 的推理结果，batch 大小由 self.batch_size 决定
         length = len(self.face_list_cycle)
-        img_batch = []
-        for i in range(self.batch_size):
-            idx = mirror_index(length, index + i)
-            face = self.face_list_cycle[idx]
-            img_batch.append(face)
+        batch_indices = get_mirror_batch_indices(length, index, self.batch_size)
+        img_batch = [self.face_list_cycle[idx] for idx in batch_indices]
         img_batch, audiofeat_batch = np.asarray(img_batch), np.asarray(audiofeat_batch)
+        face = img_batch[0]
 
         img_masked = img_batch.copy()
         img_masked[:, face.shape[0]//2:] = 0

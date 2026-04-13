@@ -61,9 +61,13 @@ class SessionManager:
 
         # 在线程池中构建 session（加载模型非常耗时）
         build_start = time.perf_counter()
-        avatar_session = await asyncio.get_event_loop().run_in_executor(
-            None, self.build_session_fn, sessionid, params
-        )
+        try:
+            avatar_session = await asyncio.get_event_loop().run_in_executor(
+                None, self.build_session_fn, sessionid, params
+            )
+        except Exception:
+            self.sessions.pop(sessionid, None)
+            raise
         self.sessions[sessionid] = avatar_session
         logger.info('session build done sessionid=%s elapsed=%.3fs', sessionid, time.perf_counter() - build_start)
         return sessionid
@@ -76,8 +80,12 @@ class SessionManager:
         """销毁会话资源"""
         if sessionid in self.sessions:
             logger.info(f"Removing session {sessionid}")
-            # todo: 还可以主动调 avatar_session 释放
-            self.sessions.pop(sessionid, None)
+            avatar_session = self.sessions.pop(sessionid, None)
+            if avatar_session is not None and hasattr(avatar_session, 'shutdown'):
+                try:
+                    avatar_session.shutdown()
+                except Exception:
+                    logger.exception('session shutdown failed, sessionid=%s', sessionid)
 
 # 单例抛出
 session_manager = SessionManager()

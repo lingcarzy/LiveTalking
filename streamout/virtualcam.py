@@ -26,6 +26,19 @@ class VirtualCamOutput(BaseOutput):
         self._audio_thread = None
         self._quit_event = None
 
+    @staticmethod
+    def _push_with_drop_oldest(q, item) -> None:
+        import queue
+        while True:
+            try:
+                q.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    return
+
     def _play_audio_loop(self):
         import pyaudio
         p = pyaudio.PyAudio()
@@ -55,7 +68,7 @@ class VirtualCamOutput(BaseOutput):
             # Start PyAudio playback thread
             import queue
             from threading import Thread, Event
-            self._audio_queue = queue.Queue(maxsize=3000)
+            self._audio_queue = queue.Queue(maxsize=max(100, self.fps * 4))
             self._quit_event = Event()
             self._audio_thread = Thread(target=self._play_audio_loop, daemon=True, name="pyaudio_stream")
             self._audio_thread.start()
@@ -80,7 +93,7 @@ class VirtualCamOutput(BaseOutput):
 
     def push_audio_frame(self, frame, eventpoint=None) -> None:
         if self._audio_queue:
-            self._audio_queue.put(frame.tobytes())
+            self._push_with_drop_oldest(self._audio_queue, frame.tobytes())
             self.parent.notify(eventpoint)
 
     def stop(self) -> None:

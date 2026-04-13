@@ -5,6 +5,7 @@
 import json
 import numpy as np
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 
 from utils.logger import logger
@@ -32,6 +33,8 @@ def json_error(msg: str, code: int = -1):
 
 
 from server.session_manager import session_manager
+
+LLM_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm-worker")
 
 def get_session(request, sessionid: str):
     """从 app 中获取 session 实例"""
@@ -76,8 +79,8 @@ async def human(request):
         elif msg_type == 'chat':
             llm_response = request.app.get("llm_response")
             if llm_response:
-                asyncio.get_event_loop().run_in_executor(
-                    None, llm_response, text, avatar_session, datainfo
+                asyncio.get_running_loop().run_in_executor(
+                    LLM_EXECUTOR, llm_response, text, avatar_session, datainfo
                 )
 
         return json_ok()

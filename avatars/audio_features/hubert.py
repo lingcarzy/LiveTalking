@@ -30,7 +30,7 @@ class HubertASR(BaseASR):
             if audio_frame.type==0:
                 is_all_silence=False  
             self.frames.append(audio_frame.data)
-            self.output_queue.put(audio_frame)
+            self._put_with_drop_oldest(self.output_queue, audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return
@@ -44,7 +44,7 @@ class HubertASR(BaseASR):
                                             audio_feat_win = self.audio_feat_length, start=self.stride_left_size/2,
                                             feature_idx_multiplier=2)
 
-        self.feat_queue.put(mel_chunks)
+        self._put_with_drop_oldest(self.feat_queue, mel_chunks)
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]
         self.last_is_silence = is_all_silence
         #print(f"Processing audio costs {(time.time() - start_time) * 1000}ms")

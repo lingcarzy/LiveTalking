@@ -61,7 +61,7 @@ class WhisperASR(BaseASR):
         for _ in range(self.batch_size*2):
             audio_frame = self.get_audio_frame()
             self.frames.append(audio_frame.data)
-            self.output_queue.put(audio_frame)
+            self._put_with_drop_oldest(self.output_queue, audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return
@@ -71,6 +71,6 @@ class WhisperASR(BaseASR):
         whisper_chunks = self._feature2chunks(feature_array=whisper_feature,batch_size=self.batch_size,
                                               audio_feat_win = [0,5],start=self.stride_left_size/2,
                                               feature_idx_multiplier=2)
-        self.feat_queue.put(whisper_chunks)
+        self._put_with_drop_oldest(self.feat_queue, whisper_chunks)
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

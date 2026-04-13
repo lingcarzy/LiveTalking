@@ -4,6 +4,7 @@
 
 import subprocess
 import time
+import queue
 import numpy as np
 from streamout.base_output import BaseOutput
 from registry import register
@@ -34,8 +35,7 @@ class RTMPOutput(BaseOutput):
 
     def start(self) -> None:
         """Streamer 延迟到第一帧视频到达时再根据实际宽高初始化"""
-        import queue
-        self._audio_queue = queue.Queue()
+        self._audio_queue = queue.Queue(maxsize=max(100, self.fps * 4))
         self._quit_event = False
 
     def _init_streamer(self, frame_height, frame_width):
@@ -66,7 +66,20 @@ class RTMPOutput(BaseOutput):
 
         self._starttime=time.perf_counter()
         self._totalframe=0
+        self._frame_interval = 1.0 / float(max(1, self.fps))
         logger.info(f"RTMP output started via python_rtmpstream: {self.push_url} with resolution {frame_width}x{frame_height}")
+
+    @staticmethod
+    def _push_with_drop_oldest(q, item) -> None:
+        while True:
+            try:
+                q.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    return
 
     def push_video_frame(self, frame) -> None:
         if isinstance(frame, np.ndarray):
@@ -84,9 +97,12 @@ class RTMPOutput(BaseOutput):
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self._streamer.stream_frame(rgb_frame)
 
-            delay = self._starttime+self._totalframe*0.04-time.perf_counter() #40ms
+            delay = self._starttime + self._totalframe * self._frame_interval - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
+            elif delay < -self._frame_interval * 3:
+                # Reset pacing baseline when downstream blocks too long to avoid drift accumulation.
+                self._starttime = time.perf_counter() - self._totalframe * self._frame_interval
             self._totalframe += 1
 
             self.totaltime += (time.perf_counter() - self.lasttime)
@@ -108,7 +124,7 @@ class RTMPOutput(BaseOutput):
                 self._streamer.stream_frame_audio(frame)
                 self.parent.notify(eventpoint)
             else:
-                self._audio_queue.put(frame)
+                self._push_with_drop_oldest(self._audio_queue, frame)
 
     def stop(self) -> None:
         self._quit_event = True

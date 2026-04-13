@@ -24,16 +24,28 @@ class BaseTTS:
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
         self.input_stream = BytesIO()
 
-        self.msgqueue = Queue()
+        self.msgqueue = Queue(maxsize=max(32, getattr(opt, 'batch_size', 16) * 8))
         self.state = State.RUNNING
 
     def flush_talk(self):
-        self.msgqueue.queue.clear()
+        while True:
+            try:
+                self.msgqueue.get_nowait()
+            except queue.Empty:
+                break
         self.state = State.PAUSE
 
     def put_msg_txt(self, msg: str, datainfo: dict = {}): 
         if len(msg) > 0:
-            self.msgqueue.put((msg, datainfo))
+            while True:
+                try:
+                    self.msgqueue.put_nowait((msg, datainfo))
+                    break
+                except queue.Full:
+                    try:
+                        self.msgqueue.get_nowait()
+                    except queue.Empty:
+                        break
 
     def render(self, quit_event):
         process_thread = Thread(target=self.process_tts, args=(quit_event,))
