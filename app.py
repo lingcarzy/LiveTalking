@@ -144,21 +144,15 @@ def main():
     if opt.model == 'musetalk':
         model = load_model()
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id) 
-        if not opt.skip_model_warmup:
-            warm_up(opt.batch_size,model)
+        warm_up(opt.batch_size,model)
     elif opt.model == 'wav2lip':
         model = load_model("./models/wav2lip.pth")
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
-        if not opt.skip_model_warmup:
-            warm_up(opt.batch_size,model,256)
+        warm_up(opt.batch_size,model,256)
     elif opt.model == 'ultralight':
         model = load_model(opt)
         global_avatars[opt.avatar_id] = load_avatar(opt.avatar_id)
-        if not opt.skip_model_warmup:
-            warm_up(opt.batch_size,global_avatars[opt.avatar_id],160)
-
-    if opt.skip_model_warmup:
-        logger.info('skip_model_warmup=true, startup latency reduced; first talking may have a short cold-start.')
+        warm_up(opt.batch_size,global_avatars[opt.avatar_id],160)
 
     # init rtc manager
     session_manager.init_builder(build_avatar_session)

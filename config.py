@@ -77,12 +77,12 @@ def parse_args():
                         help="custom action json")
 
     # ─── TTS ───────────────────────────────────────────────────────────
-    parser.add_argument('--tts', type=str, default='edgetts',
+    parser.add_argument('--tts', type=str, default=os.getenv('TTS', 'edgetts'),
                         help="tts plugin: edgetts/gpt-sovits/cosyvoice/fishtts/tencent/doubao/indextts2/azuretts/qwentts")
-    parser.add_argument('--REF_FILE', type=str, default="zh-CN-YunxiaNeural",
+    parser.add_argument('--REF_FILE', type=str, default=os.getenv('REF_FILE', "zh-CN-YunxiaNeural"),
                         help="参考文件名或语音模型ID")
-    parser.add_argument('--REF_TEXT', type=str, default=None)
-    parser.add_argument('--TTS_SERVER', type=str, default='http://127.0.0.1:9880')
+    parser.add_argument('--REF_TEXT', type=str, default=os.getenv('REF_TEXT', None))
+    parser.add_argument('--TTS_SERVER', type=str, default=os.getenv('TTS_SERVER', 'http://127.0.0.1:9880'))
 
     # ─── LLM ───────────────────────────────────────────────────────────
     parser.add_argument('--llm_provider', type=str,
@@ -126,8 +126,8 @@ def parse_args():
     parser.add_argument('--ice_server_urls', type=str, default=os.getenv('ICE_SERVER_URLS', ''),
                         help="comma-separated ICE urls, empty disables STUN/TURN")
     parser.add_argument('--skip_model_warmup', type=str_to_bool,
-                        default=str_to_bool(os.getenv('SKIP_MODEL_WARMUP', 'true')),
-                        help="skip startup warmup to reduce launch time")
+                        default=False,
+                        help="deprecated, ignored: model warmup is always enabled")
 
     opt = parser.parse_args()
 
@@ -143,5 +143,8 @@ def parse_args():
         opt.max_audio_upload_mb = 1
     if opt.max_custom_config_chars < 100:
         opt.max_custom_config_chars = 100
+
+    # keep backward compatibility for existing scripts/env, but always warm up models
+    opt.skip_model_warmup = False
 
     return opt
