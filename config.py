@@ -78,7 +78,7 @@ def parse_args():
 
     # ─── TTS ───────────────────────────────────────────────────────────
     parser.add_argument('--tts', type=str, default=os.getenv('TTS', 'edgetts'),
-                        help="tts plugin: edgetts/gpt-sovits/cosyvoice/fishtts/tencent/doubao/indextts2/azuretts/qwentts")
+                        help="tts plugin: edgetts/gpt-sovits/cosyvoice/cosyvoice3/fishtts/tencent/doubao/indextts2/azuretts/qwentts")
     parser.add_argument('--REF_FILE', type=str, default=os.getenv('REF_FILE', "zh-CN-YunxiaNeural"),
                         help="参考文件名或语音模型ID")
     parser.add_argument('--REF_TEXT', type=str, default=os.getenv('REF_TEXT', None))

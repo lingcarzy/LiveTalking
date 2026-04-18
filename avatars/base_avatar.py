@@ -91,6 +91,7 @@ class BaseAvatar:
             'gpt-sovits': 'tts.sovits',
             'xtts': 'tts.xtts',
             'cosyvoice': 'tts.cosyvoice',
+            'cosyvoice3': 'tts.cosyvoice3',
             'fishtts': 'tts.fish',
             'tencent': 'tts.tencent',
             'doubao': 'tts.doubao',
