@@ -39,6 +39,8 @@ class BaseASR:
         self.play_queue:Queue[AudioFrameData] = Queue(maxsize=max(100, opt.batch_size * 24))
 
         self.batch_size = opt.batch_size
+        self._streaming_audio_active = False
+        self._streaming_timeout_sec = 0.25
 
         self.frames: list[NDArray[np.float32]] = []
         self.stride_left_size = opt.l
@@ -49,6 +51,7 @@ class BaseASR:
         #self.warm_up()
 
     def flush_talk(self):
+        self._streaming_audio_active = False
         self._drain_queue(self.queue)
         self._drain_queue(self.output_queue)
         self._drain_queue(self.play_queue)
@@ -79,10 +82,15 @@ class BaseASR:
         return AudioFrameData(data=np.zeros(self.chunk, dtype=np.float32), type=1, userdata=userdata)
 
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
+        status = datainfo.get('status')
+        if status == 'start':
+            self._streaming_audio_active = True
+
         frame_type = 1 if np.count_nonzero(audio_chunk) == 0 else 0
         self._put_with_drop_oldest(self.queue, AudioFrameData(data=audio_chunk, type=frame_type, userdata=datainfo))
 
-        if datainfo.get('status') == 'end':
+        if status == 'end':
+            self._streaming_audio_active = False
             # Pre-fill tail silence for lip-sync context instead of waiting on repeated timeout-generated silence.
             padding_chunks = max(self.stride_right_size, self.batch_size * 2 - 1)
             for _ in range(padding_chunks):
@@ -96,7 +104,8 @@ class BaseASR:
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
             else:
-                frame = self.queue.get(block=True,timeout=0.05)
+                timeout = self._streaming_timeout_sec if self._streaming_audio_active else 0.05
+                frame = self.queue.get(block=True,timeout=timeout)
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
