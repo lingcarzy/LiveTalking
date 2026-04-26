@@ -112,26 +112,9 @@ class PlayerStreamTrack(MediaStreamTrack):
 
     async def recv(self) -> Union[Frame, Packet]:
         self._player._start(self)
-        frame = None
-        eventpoint = None
-        qwait = 0.0
-        dequeue_timeout = AUDIO_PTIME if self.kind == 'audio' else VIDEO_PTIME
-        while frame is None:
-            qwait_start = time.perf_counter()
-            try:
-                frame, eventpoint = await asyncio.to_thread(self._queue.get, True, dequeue_timeout)
-            except queue.Empty:
-                qwait += time.perf_counter() - qwait_start
-                if self._player is None:
-                    raise Exception
-                fallback = self._player.get_fallback_packet(self.kind)
-                if fallback is None:
-                    continue
-                frame, eventpoint = fallback
-                self._player._on_track_underrun(self.kind)
-                break
-            else:
-                qwait += time.perf_counter() - qwait_start
+        qwait_start = time.perf_counter()
+        frame, eventpoint = await asyncio.to_thread(self._queue.get)
+        qwait = time.perf_counter() - qwait_start
 
         self.recv_wait_total += qwait
         self.recv_wait_count += 1
@@ -199,8 +182,6 @@ class HumanPlayer:
             'audio_dropped': 0,
             'video_recv': 0,
             'audio_recv': 0,
-            'video_underrun': 0,
-            'audio_underrun': 0,
             'video_wait_total': 0.0,
             'audio_wait_total': 0.0,
         }
@@ -250,20 +231,6 @@ class HumanPlayer:
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()
 
-    def get_fallback_packet(self, kind: str):
-        if kind == 'video':
-            from av import VideoFrame
-            frame_data = self._last_video_frame
-            if frame_data is None:
-                return None
-            return VideoFrame.from_ndarray(frame_data, format="bgr24"), None
-
-        frame = AudioFrame(format='s16', layout='mono', samples=int(SAMPLE_RATE * AUDIO_PTIME))
-        silence = np.zeros((1, int(SAMPLE_RATE * AUDIO_PTIME)), dtype=np.int16)
-        frame.planes[0].update(silence.tobytes())
-        frame.sample_rate = SAMPLE_RATE
-        return frame, None
-
     def notify(self,eventpoint):
         if self.__container is not None:
             self.__container.notify(eventpoint)
@@ -276,12 +243,6 @@ class HumanPlayer:
             self._stats['audio_recv'] += 1
             self._stats['audio_wait_total'] += wait_seconds
         self._maybe_log_stats()
-
-    def _on_track_underrun(self, kind: str) -> None:
-        if kind == 'video':
-            self._stats['video_underrun'] += 1
-        else:
-            self._stats['audio_underrun'] += 1
 
     def _maybe_log_stats(self) -> None:
         now = time.perf_counter()
@@ -301,7 +262,7 @@ class HumanPlayer:
             a_wait_avg_ms = self._stats['audio_wait_total'] * 1000.0 / self._stats['audio_recv']
 
         mylogger.info(
-            'webrtc queue stats: vq=%d aq=%d v_push_fps=%.2f v_recv_fps=%.2f a_push=%.2f a_recv=%.2f v_drop=%d a_drop=%d v_underrun=%d a_underrun=%d v_wait=%.2fms a_wait=%.2fms',
+            'webrtc queue stats: vq=%d aq=%d v_push_fps=%.2f v_recv_fps=%.2f a_push=%.2f a_recv=%.2f v_drop=%d a_drop=%d v_wait=%.2fms a_wait=%.2fms',
             self.__video._queue.qsize(),
             self.__audio._queue.qsize(),
             dv_push / elapsed,
@@ -310,8 +271,6 @@ class HumanPlayer:
             da_recv / elapsed,
             self._stats['video_dropped'],
             self._stats['audio_dropped'],
-            self._stats['video_underrun'],
-            self._stats['audio_underrun'],
             v_wait_avg_ms,
             a_wait_avg_ms,
         )
