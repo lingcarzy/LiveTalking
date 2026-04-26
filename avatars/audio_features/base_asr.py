@@ -74,8 +74,19 @@ class BaseASR:
                 except queue.Empty:
                     return
 
+    def _make_silence_frame(self, *, skip_playback: bool = False) -> AudioFrameData:
+        userdata = {'_skip_playback': True} if skip_playback else {}
+        return AudioFrameData(data=np.zeros(self.chunk, dtype=np.float32), type=1, userdata=userdata)
+
     def put_audio_frame(self,audio_chunk:NDArray[np.float32],datainfo:dict): #16khz 20ms pcm
-        self._put_with_drop_oldest(self.queue, AudioFrameData(data=audio_chunk,type=0,userdata=datainfo))
+        frame_type = 1 if np.count_nonzero(audio_chunk) == 0 else 0
+        self._put_with_drop_oldest(self.queue, AudioFrameData(data=audio_chunk, type=frame_type, userdata=datainfo))
+
+        if datainfo.get('status') == 'end':
+            # Pre-fill tail silence for lip-sync context instead of waiting on repeated timeout-generated silence.
+            padding_chunks = max(self.stride_right_size, self.batch_size * 2 - 1)
+            for _ in range(padding_chunks):
+                self._put_with_drop_oldest(self.queue, self._make_silence_frame(skip_playback=True))
 
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio
     def get_audio_frame(self)->AudioFrameData:        
@@ -89,8 +100,7 @@ class BaseASR:
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
-            frame = np.zeros(self.chunk, dtype=np.float32)
-            return AudioFrameData(data=frame, type=1, userdata={})
+            return self._make_silence_frame()
 
 
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio

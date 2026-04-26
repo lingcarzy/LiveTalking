@@ -500,6 +500,9 @@ class BaseAvatar:
             except queue.Empty:
                 continue
 
+            if audio_frame.userdata.get('_skip_playback'):
+                continue
+
             frame = (audio_frame.data * 32767).astype(np.int16)
             self.output.push_audio_frame(frame, audio_frame.userdata)
             self.record_audio_data(frame)
