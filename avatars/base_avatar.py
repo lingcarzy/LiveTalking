@@ -90,6 +90,7 @@ class BaseAvatar:
             'infer_batches': 0,
             'infer_frames': 0,
             'infer_busy_sec': 0.0,
+            'infer_wait_sec': 0.0,
             'process_frames': 0,
             'process_audio_chunks': 0,
             'process_busy_sec': 0.0,
@@ -352,17 +353,23 @@ class BaseAvatar:
         # infernum = 0
         logger.info('start inference')
         while not quit_event.is_set():
-            starttime = time.perf_counter()
+            loop_start = time.perf_counter()
+            wait_sec = 0.0
             audiofeat_batch = []
             try:
+                wait_start = time.perf_counter()
                 audiofeat_batch = self.asr.feat_queue.get(block=True, timeout=1)
+                wait_sec += time.perf_counter() - wait_start
             except queue.Empty:
+                self._perf['infer_wait_sec'] += time.perf_counter() - loop_start
                 continue
                 
             is_all_silence = True
             audio_frames: list[AudioFrameData] = []
             for _ in range(self.batch_size * 2):
+                wait_start = time.perf_counter()
                 audioframe:AudioFrameData = self.asr.output_queue.get()
+                wait_sec += time.perf_counter() - wait_start
                 if audioframe.type == 0:
                     is_all_silence = False               
                 audio_frames.append(audioframe)
@@ -394,7 +401,9 @@ class BaseAvatar:
 
             self._perf['infer_batches'] += 1
             self._perf['infer_frames'] += self.batch_size
-            self._perf['infer_busy_sec'] += (time.perf_counter() - starttime)
+            loop_elapsed = time.perf_counter() - loop_start
+            self._perf['infer_wait_sec'] += wait_sec
+            self._perf['infer_busy_sec'] += max(0.0, loop_elapsed - wait_sec)
             self._maybe_log_pipeline_stats()
                     
             if current_speaking != last_speaking:
@@ -505,6 +514,7 @@ class BaseAvatar:
         process_fps = self._perf['process_frames'] / max(1e-6, window)
         audio_chunk_rate = self._perf['process_audio_chunks'] / max(1e-6, window)
         infer_busy_pct = (self._perf['infer_busy_sec'] / max(1e-6, window)) * 100.0
+        infer_wait_pct = (self._perf['infer_wait_sec'] / max(1e-6, window)) * 100.0
         process_busy_pct = (self._perf['process_busy_sec'] / max(1e-6, window)) * 100.0
 
         asr_q = self.asr.queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'queue') else -1
@@ -514,11 +524,12 @@ class BaseAvatar:
         out_buf = self.output.get_buffer_size() if hasattr(self, 'output') else -1
 
         logger.info(
-            'pipeline stats: infer_fps=%.2f process_fps=%.2f audio_chunk_rate=%.2f infer_busy=%.1f%% process_busy=%.1f%% q_asr=%d q_asr_out=%d q_feat=%d q_res=%d out_buf=%d speaking=%s',
+            'pipeline stats: infer_fps=%.2f process_fps=%.2f audio_chunk_rate=%.2f infer_busy=%.1f%% infer_wait=%.1f%% process_busy=%.1f%% q_asr=%d q_asr_out=%d q_feat=%d q_res=%d out_buf=%d speaking=%s',
             infer_fps,
             process_fps,
             audio_chunk_rate,
             infer_busy_pct,
+            infer_wait_pct,
             process_busy_pct,
             asr_q,
             asr_out_q,
@@ -532,6 +543,7 @@ class BaseAvatar:
         self._perf['infer_batches'] = 0
         self._perf['infer_frames'] = 0
         self._perf['infer_busy_sec'] = 0.0
+        self._perf['infer_wait_sec'] = 0.0
         self._perf['process_frames'] = 0
         self._perf['process_audio_chunks'] = 0
         self._perf['process_busy_sec'] = 0.0
