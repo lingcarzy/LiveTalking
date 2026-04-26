@@ -92,9 +92,11 @@ class BaseAvatar:
             'infer_frames': 0,
             'infer_busy_sec': 0.0,
             'infer_wait_sec': 0.0,
+            'infer_stage_sec': 0.0,
             'process_frames': 0,
             'process_audio_chunks': 0,
             'process_busy_sec': 0.0,
+            'process_paste_sec': 0.0,
         }
         self._watermark_text = str(getattr(opt, 'watermark_text', 'LiveTalking') or '').strip()
         self._watermark_enabled = bool(self._watermark_text)
@@ -386,11 +388,13 @@ class BaseAvatar:
             else:
                 if current_speaking and not last_speaking and self.custom_index.get(1) is not None: #从静音到说话切换,并且有自定义静态视频
                     index = 0
-                t = time.perf_counter()
+                infer_stage_start = time.perf_counter()
 
                 pred = self.inference_batch(index, audiofeat_batch)
 
-                counttime += (time.perf_counter() - t)
+                infer_stage_elapsed = time.perf_counter() - infer_stage_start
+                counttime += infer_stage_elapsed
+                self._perf['infer_stage_sec'] += infer_stage_elapsed
                 count += self.batch_size
                 if count >= 100:
                     logger.info(f"------actual avg infer fps:{count/counttime:.4f}")
@@ -440,6 +444,7 @@ class BaseAvatar:
             if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
                 self.speaking = False
                 audiotype = audio_frames[0].type
+                paste_stage_start = time.perf_counter()
                 if self.custom_index.get(audiotype) is not None: #有自定义视频
                     mirindex = mirror_index(len(self.custom_img_cycle[audiotype]),self.custom_index[audiotype])
                     target_frame = self.custom_img_cycle[audiotype][mirindex]
@@ -458,8 +463,10 @@ class BaseAvatar:
                     _last_silent_frame = combine_frame.copy()
                 else:
                     combine_frame = target_frame
+                self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
             else:
                 self.speaking = True
+                paste_stage_start = time.perf_counter()
                 try:
                     current_frame = self.paste_back_frame(res_frame,idx)
                 except Exception as e:
@@ -476,6 +483,7 @@ class BaseAvatar:
                     _last_speaking_frame = combine_frame.copy()
                 else:
                     combine_frame = current_frame
+                self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
 
             if self._watermark_enabled and self._watermark_text:
                 self._apply_watermark(combine_frame)
@@ -523,6 +531,10 @@ class BaseAvatar:
         infer_busy_pct = (self._perf['infer_busy_sec'] / max(1e-6, window)) * 100.0
         infer_wait_pct = (self._perf['infer_wait_sec'] / max(1e-6, window)) * 100.0
         process_busy_pct = (self._perf['process_busy_sec'] / max(1e-6, window)) * 100.0
+        infer_stage_ms = (self._perf['infer_stage_sec'] / max(1, self._perf['infer_batches'])) * 1000.0
+        process_paste_ms = (self._perf['process_paste_sec'] / max(1, self._perf['process_frames'])) * 1000.0
+        process_total_ms = (self._perf['process_busy_sec'] / max(1, self._perf['process_frames'])) * 1000.0
+        paste_share_pct = (self._perf['process_paste_sec'] / max(1e-6, self._perf['process_busy_sec'])) * 100.0
 
         asr_q = self.asr.queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'queue') else -1
         asr_out_q = self.asr.output_queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'output_queue') else -1
@@ -531,13 +543,17 @@ class BaseAvatar:
         out_buf = self.output.get_buffer_size() if hasattr(self, 'output') else -1
 
         logger.info(
-            'pipeline stats: infer_fps=%.2f process_fps=%.2f audio_chunk_rate=%.2f infer_busy=%.1f%% infer_wait=%.1f%% process_busy=%.1f%% q_asr=%d q_asr_out=%d q_feat=%d q_res=%d out_buf=%d speaking=%s',
+            'pipeline stats: infer_fps=%.2f process_fps=%.2f audio_chunk_rate=%.2f infer_busy=%.1f%% infer_wait=%.1f%% process_busy=%.1f%% t_infer=%.2fms t_paste=%.2fms t_total=%.2fms paste_share=%.1f%% q_asr=%d q_asr_out=%d q_feat=%d q_res=%d out_buf=%d speaking=%s',
             infer_fps,
             process_fps,
             audio_chunk_rate,
             infer_busy_pct,
             infer_wait_pct,
             process_busy_pct,
+            infer_stage_ms,
+            process_paste_ms,
+            process_total_ms,
+            paste_share_pct,
             asr_q,
             asr_out_q,
             asr_feat_q,
@@ -551,9 +567,11 @@ class BaseAvatar:
         self._perf['infer_frames'] = 0
         self._perf['infer_busy_sec'] = 0.0
         self._perf['infer_wait_sec'] = 0.0
+        self._perf['infer_stage_sec'] = 0.0
         self._perf['process_frames'] = 0
         self._perf['process_audio_chunks'] = 0
         self._perf['process_busy_sec'] = 0.0
+        self._perf['process_paste_sec'] = 0.0
 
     def _apply_watermark(self, frame: NDArray[np.uint8]) -> None:
         h, w = frame.shape[:2]
