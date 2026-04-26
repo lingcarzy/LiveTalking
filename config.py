@@ -125,6 +125,12 @@ def parse_args():
                         help="web listen port")
     parser.add_argument('--ice_server_urls', type=str, default=os.getenv('ICE_SERVER_URLS', ''),
                         help="comma-separated ICE urls, empty disables STUN/TURN")
+    parser.add_argument('--webrtc_video_encoder', type=str,
+                        default=os.getenv('WEBRTC_VIDEO_ENCODER', 'auto'),
+                        help="WebRTC H264 encoder: auto/nvenc/software")
+    parser.add_argument('--webrtc_nvenc_preset', type=str,
+                        default=os.getenv('WEBRTC_NVENC_PRESET', 'p4'),
+                        help="NVENC preset for WebRTC (e.g. p1-p7, llhp)")
     parser.add_argument('--skip_model_warmup', type=str_to_bool,
                         default=False,
                         help="deprecated, ignored: model warmup is always enabled")
@@ -143,6 +149,14 @@ def parse_args():
         opt.max_audio_upload_mb = 1
     if opt.max_custom_config_chars < 100:
         opt.max_custom_config_chars = 100
+
+    opt.webrtc_video_encoder = str(opt.webrtc_video_encoder).strip().lower()
+    if opt.webrtc_video_encoder in ('cpu', 'libx264'):
+        opt.webrtc_video_encoder = 'software'
+    if opt.webrtc_video_encoder not in ('auto', 'nvenc', 'software'):
+        opt.webrtc_video_encoder = 'auto'
+
+    opt.webrtc_nvenc_preset = str(opt.webrtc_nvenc_preset).strip() or 'p4'
 
     # keep backward compatibility for existing scripts/env, but always warm up models
     opt.skip_model_warmup = False
