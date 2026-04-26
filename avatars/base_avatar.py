@@ -422,7 +422,8 @@ class BaseAvatar:
 
     def process_frames(self,quit_event):
         enable_transition = False  # 设置为False禁用过渡效果，True启用
-        frame_duration = 1.0 / float(max(1, self.fps))
+        target_fps = int(getattr(self.opt, 'fps', 25) or 25)
+        frame_duration = 1.0 / float(max(1, target_fps))
         next_video_ts = time.perf_counter()
         
         _last_speaking = False
@@ -438,6 +439,9 @@ class BaseAvatar:
                 audio_frames: list[AudioFrameData]
                 res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
             except queue.Empty:
+                continue
+            except Exception:
+                logger.exception('process_frames queue get failed')
                 continue
             
             # 检测状态变化
@@ -491,22 +495,26 @@ class BaseAvatar:
                     combine_frame = current_frame
                 self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
 
-            if self._watermark_enabled and self._watermark_text:
-                self._apply_watermark(combine_frame)
+            try:
+                if self._watermark_enabled and self._watermark_text:
+                    self._apply_watermark(combine_frame)
             
             # 使用统一输出接口推送视频帧
-            now = time.perf_counter()
-            if next_video_ts > now:
-                time.sleep(next_video_ts - now)
-            else:
-                next_video_ts = now
-            self.output.push_video_frame(combine_frame)
-            self.record_video_data(combine_frame)
-            next_video_ts += frame_duration
+                now = time.perf_counter()
+                if next_video_ts > now:
+                    time.sleep(next_video_ts - now)
+                else:
+                    next_video_ts = now
+                self.output.push_video_frame(combine_frame)
+                self.record_video_data(combine_frame)
+                next_video_ts += frame_duration
 
-            self._perf['process_frames'] += 1
-            self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
-            self._maybe_log_pipeline_stats()
+                self._perf['process_frames'] += 1
+                self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
+                self._maybe_log_pipeline_stats()
+            except Exception:
+                logger.exception('process_frames send/render failed')
+                continue
                 
             # if self.opt.transport == 'virtualcam' and hasattr(self.output, '_cam') and self.output._cam:
             #     self.output._cam.sleep_until_next_frame()
