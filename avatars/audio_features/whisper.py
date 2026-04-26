@@ -61,7 +61,7 @@ class WhisperASR(BaseASR):
         for _ in range(self.batch_size*2):
             audio_frame = self.get_audio_frame()
             self.frames.append(audio_frame.data)
-            self._put_with_drop_oldest(self.output_queue, audio_frame)
+            self.publish_audio_frame(audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return

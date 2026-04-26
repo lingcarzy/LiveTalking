@@ -85,6 +85,7 @@ class BaseAvatar:
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
+        self._audio_dispatch_started = False
         self._perf_window_start = time.perf_counter()
         self._perf = {
             'infer_batches': 0,
@@ -421,8 +422,6 @@ class BaseAvatar:
             _last_silent_frame = None  # 静音帧缓存
             _last_speaking_frame = None  # 说话帧缓存
 
-        self.output.start()
-        
         while not quit_event.is_set():
             frame_start = time.perf_counter()
             try:
@@ -485,24 +484,29 @@ class BaseAvatar:
             self.output.push_video_frame(combine_frame)
             self.record_video_data(combine_frame)
 
-            for audio_frame in audio_frames:
-                #frame,type,eventpoint = audio_frame
-                frame = (audio_frame.data * 32767).astype(np.int16)
-
-                # 使用统一输出接口推送音频帧
-                self.output.push_audio_frame(frame, audio_frame.userdata)
-                self.record_audio_data(frame)
-
             self._perf['process_frames'] += 1
-            self._perf['process_audio_chunks'] += len(audio_frames)
             self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
             self._maybe_log_pipeline_stats()
                 
             # if self.opt.transport == 'virtualcam' and hasattr(self.output, '_cam') and self.output._cam:
             #     self.output._cam.sleep_until_next_frame()
 
-        self.output.stop()
         logger.info('baseavatar process_frames thread stop') 
+
+    def process_audio(self, quit_event):
+        while not quit_event.is_set():
+            try:
+                audio_frame: AudioFrameData = self.asr.get_play_audio_out(block=True, timeout=1)
+            except queue.Empty:
+                continue
+
+            frame = (audio_frame.data * 32767).astype(np.int16)
+            self.output.push_audio_frame(frame, audio_frame.userdata)
+            self.record_audio_data(frame)
+            self._perf['process_audio_chunks'] += 1
+            self._maybe_log_pipeline_stats()
+
+        logger.info('baseavatar process_audio thread stop')
 
     def _maybe_log_pipeline_stats(self):
         now = time.perf_counter()
@@ -589,6 +593,7 @@ class BaseAvatar:
         self.quit_event = quit_event
         
         self.init_customindex()
+        self.output.start()
         self.tts.render(quit_event)
 
         infer_quit_event = mp.Event()
@@ -598,6 +603,10 @@ class BaseAvatar:
         process_quit_event = Event()
         process_thread = Thread(target=self.process_frames, args=(process_quit_event,))
         process_thread.start()
+
+        audio_quit_event = Event()
+        audio_thread = Thread(target=self.process_audio, args=(audio_quit_event,))
+        audio_thread.start()
 
         while not quit_event.is_set(): 
             self.asr.run_step()
@@ -634,6 +643,10 @@ class BaseAvatar:
 
         process_quit_event.set()
         process_thread.join()
+
+        audio_quit_event.set()
+        audio_thread.join()
+        self.output.stop()
 
     def shutdown(self):
         """Best-effort resource cleanup for session lifecycle management."""

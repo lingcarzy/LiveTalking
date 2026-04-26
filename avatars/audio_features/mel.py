@@ -38,7 +38,7 @@ class MelASR(BaseASR):
             audioframe = self.get_audio_frame()
             self.frames.append(audioframe.data)
             # put to output
-            self._put_with_drop_oldest(self.output_queue, audioframe)
+            self.publish_audio_frame(audioframe)
         # context not enough, do not run network.
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
             return

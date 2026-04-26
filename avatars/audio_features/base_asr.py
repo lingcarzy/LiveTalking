@@ -36,6 +36,7 @@ class BaseASR:
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
         self.queue:Queue[AudioFrameData] = Queue(maxsize=max(8, opt.batch_size * 8))
         self.output_queue:Queue[AudioFrameData] = Queue(maxsize=max(16, opt.batch_size * 12))
+        self.play_queue:Queue[AudioFrameData] = Queue(maxsize=max(100, opt.batch_size * 24))
 
         self.batch_size = opt.batch_size
 
@@ -50,6 +51,7 @@ class BaseASR:
     def flush_talk(self):
         self._drain_queue(self.queue)
         self._drain_queue(self.output_queue)
+        self._drain_queue(self.play_queue)
         self._drain_queue(self.feat_queue)
 
     @staticmethod
@@ -94,12 +96,19 @@ class BaseASR:
     #return frame:audio pcm; type: 0-normal speak, 1-silence; eventpoint:custom event sync with audio
     def get_audio_out(self)->AudioFrameData: 
         return self.output_queue.get()
+
+    def get_play_audio_out(self, block=True, timeout=None)->AudioFrameData:
+        return self.play_queue.get(block, timeout)
+
+    def publish_audio_frame(self, audio_frame: AudioFrameData) -> None:
+        self._put_with_drop_oldest(self.output_queue, audio_frame)
+        self._put_with_drop_oldest(self.play_queue, audio_frame)
     
     def warm_up(self):
         for _ in range(self.stride_left_size + self.stride_right_size):
             audio_frame=self.get_audio_frame()
             self.frames.append(audio_frame.data)
-            self._put_with_drop_oldest(self.output_queue, audio_frame)
+            self.publish_audio_frame(audio_frame)
         for _ in range(self.stride_left_size):
             try:
                 self.output_queue.get_nowait()
