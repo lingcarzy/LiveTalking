@@ -422,6 +422,8 @@ class BaseAvatar:
 
     def process_frames(self,quit_event):
         enable_transition = False  # 设置为False禁用过渡效果，True启用
+        frame_duration = 1.0 / float(max(1, self.fps))
+        next_video_ts = time.perf_counter()
         
         _last_speaking = False
         _transition_start = time.time()
@@ -493,8 +495,14 @@ class BaseAvatar:
                 self._apply_watermark(combine_frame)
             
             # 使用统一输出接口推送视频帧
+            now = time.perf_counter()
+            if next_video_ts > now:
+                time.sleep(next_video_ts - now)
+            else:
+                next_video_ts = now
             self.output.push_video_frame(combine_frame)
             self.record_video_data(combine_frame)
+            next_video_ts += frame_duration
 
             self._perf['process_frames'] += 1
             self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
@@ -518,17 +526,11 @@ class BaseAvatar:
             if audio_frame.userdata.get('_skip_playback'):
                 continue
 
-            status = audio_frame.userdata.get('status') if audio_frame.userdata else None
-            if status == 'start':
-                next_send_ts = time.perf_counter()
-            elif status == 'end':
-                next_send_ts = time.perf_counter()
-
             now = time.perf_counter()
             if next_send_ts > now:
                 time.sleep(next_send_ts - now)
-            elif now - next_send_ts > 0.2:
-                # If schedule drifts too far, resync clock to avoid burst sending.
+            else:
+                # Never try to catch up by sending bursts; keep real-time pacing stable.
                 next_send_ts = now
 
             frame = (audio_frame.data * 32767).astype(np.int16)
