@@ -42,6 +42,8 @@ class BaseASR:
         self._streaming_audio_active = False
         # Keep active-stream timeout close to one audio chunk to avoid starving playback.
         self._streaming_timeout_sec = max(0.02, min(0.05, self.chunk / float(self.sample_rate)))
+        # Idle timeout should also follow chunk cadence; 50ms idle waits cap render cadence too aggressively.
+        self._idle_timeout_sec = max(0.01, min(0.02, self.chunk / float(self.sample_rate)))
 
         self.frames: list[NDArray[np.float32]] = []
         self.stride_left_size = opt.l
@@ -78,6 +80,29 @@ class BaseASR:
                 except queue.Empty:
                     return
 
+    @staticmethod
+    def _is_silence_like(frame: AudioFrameData) -> bool:
+        if frame.type != 0:
+            return True
+        return bool(frame.userdata.get('_skip_playback'))
+
+    def _put_preserve_speech(self, q: Queue, frame: AudioFrameData, *, timeout: float = 0.2) -> None:
+        """Prefer preserving speech order; only drop oldest when the incoming frame is silence-like."""
+        if self._is_silence_like(frame):
+            self._put_with_drop_oldest(q, frame)
+            return
+
+        deadline = time.perf_counter() + max(0.01, timeout)
+        while True:
+            try:
+                q.put(frame, block=True, timeout=0.02)
+                return
+            except queue.Full:
+                if time.perf_counter() >= deadline:
+                    # Backpressure still too high, degrade gracefully to keep system alive.
+                    self._put_with_drop_oldest(q, frame)
+                    return
+
     def _make_silence_frame(self, *, skip_playback: bool = False) -> AudioFrameData:
         userdata = {'_skip_playback': True} if skip_playback else {}
         return AudioFrameData(data=np.zeros(self.chunk, dtype=np.float32), type=1, userdata=userdata)
@@ -88,7 +113,7 @@ class BaseASR:
             self._streaming_audio_active = True
 
         frame_type = 1 if np.count_nonzero(audio_chunk) == 0 else 0
-        self._put_with_drop_oldest(self.queue, AudioFrameData(data=audio_chunk, type=frame_type, userdata=datainfo))
+        self._put_preserve_speech(self.queue, AudioFrameData(data=audio_chunk, type=frame_type, userdata=datainfo))
 
         if status == 'end':
             self._streaming_audio_active = False
@@ -105,7 +130,7 @@ class BaseASR:
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
             else:
-                timeout = self._streaming_timeout_sec if self._streaming_audio_active else 0.05
+                timeout = self._streaming_timeout_sec if self._streaming_audio_active else self._idle_timeout_sec
                 frame = self.queue.get(block=True,timeout=timeout)
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
@@ -121,8 +146,8 @@ class BaseASR:
         return self.play_queue.get(block, timeout)
 
     def publish_audio_frame(self, audio_frame: AudioFrameData) -> None:
-        self._put_with_drop_oldest(self.output_queue, audio_frame)
-        self._put_with_drop_oldest(self.play_queue, audio_frame)
+        self._put_preserve_speech(self.output_queue, audio_frame)
+        self._put_preserve_speech(self.play_queue, audio_frame)
 
     def report_feature_stats(self, *, step_sec: float, feat_batches: int = 0, feat_chunks: int = 0) -> None:
         if not self.parent or not hasattr(self.parent, '_perf'):

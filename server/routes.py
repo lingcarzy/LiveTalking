@@ -135,6 +135,8 @@ async def set_audiotype(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
+        if 'audiotype' not in params:
+            return json_error("audiotype is required")
         avatar_session.set_custom_state(params['audiotype'], params.get('reinit', True))
         return json_ok()
     except Exception as e:
@@ -150,10 +152,13 @@ async def record(request):
         avatar_session = get_session(request, sessionid)
         if avatar_session is None:
             return json_error("session not found")
-        if params['type'] == 'start_record':
+        action = params.get('type')
+        if action == 'start_record':
             avatar_session.start_recording()
-        elif params['type'] == 'end_record':
+        elif action == 'end_record':
             avatar_session.stop_recording()
+        else:
+            return json_error("invalid type")
         return json_ok()
     except Exception as e:
         logger.exception('record exception:')

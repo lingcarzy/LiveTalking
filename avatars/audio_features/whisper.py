@@ -57,13 +57,14 @@ class WhisperASR(BaseASR):
 
     def run_step(self):
         ############################################## extract audio feature ##############################################
-        start_time = time.time()
+        step_start = time.perf_counter()
         for _ in range(self.batch_size*2):
             audio_frame = self.get_audio_frame()
             self.frames.append(audio_frame.data)
             self.publish_audio_frame(audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
+            self.report_feature_stats(step_sec=time.perf_counter() - step_start)
             return
         
         inputs = np.concatenate(self.frames) # [N * chunk]
@@ -72,5 +73,10 @@ class WhisperASR(BaseASR):
                                               audio_feat_win = [0,5],start=self.stride_left_size/2,
                                               feature_idx_multiplier=2)
         self._put_with_drop_oldest(self.feat_queue, whisper_chunks)
+        self.report_feature_stats(
+            step_sec=time.perf_counter() - step_start,
+            feat_batches=1,
+            feat_chunks=len(whisper_chunks),
+        )
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

@@ -22,7 +22,7 @@ class HubertASR(BaseASR):
 
 
     def run_step(self):
-        start_time = time.time()
+        step_start = time.perf_counter()
         
         is_all_silence=True
         for _ in range(self.batch_size * 2):
@@ -33,6 +33,7 @@ class HubertASR(BaseASR):
             self.publish_audio_frame(audio_frame)
         
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
+            self.report_feature_stats(step_sec=time.perf_counter() - step_start)
             return
         
         mel_chunks = self.batch_size*[np.zeros((10,1024),dtype=np.float32)]  # default empty feature for silence
@@ -45,6 +46,11 @@ class HubertASR(BaseASR):
                                             feature_idx_multiplier=2)
 
         self._put_with_drop_oldest(self.feat_queue, mel_chunks)
+        self.report_feature_stats(
+            step_sec=time.perf_counter() - step_start,
+            feat_batches=1,
+            feat_chunks=len(mel_chunks),
+        )
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]
         self.last_is_silence = is_all_silence
         #print(f"Processing audio costs {(time.time() - start_time) * 1000}ms")

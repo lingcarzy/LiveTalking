@@ -438,68 +438,62 @@ class BaseAvatar:
             try:
                 audio_frames: list[AudioFrameData]
                 res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
-            except queue.Empty:
-                continue
-            except Exception:
-                logger.exception('process_frames queue get failed')
-                continue
-            
-            # 检测状态变化
-            current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
-            if current_speaking != _last_speaking:
-                logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
-                _transition_start = time.time()
-            _last_speaking = current_speaking
 
-            if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
-                self.speaking = False
-                audiotype = audio_frames[0].type
-                paste_stage_start = time.perf_counter()
-                if self.custom_index.get(audiotype) is not None: #有自定义视频
-                    mirindex = mirror_index(len(self.custom_img_cycle[audiotype]),self.custom_index[audiotype])
-                    target_frame = self.custom_img_cycle[audiotype][mirindex]
-                    self.custom_index[audiotype] += 1
-                else:
-                    target_frame = self.frame_list_cycle[idx]
-                
-                if enable_transition:
-                    # 说话→静音过渡
-                    if time.time() - _transition_start < _transition_duration and _last_speaking_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_speaking_frame, 1-alpha, target_frame, alpha, 0)
+                # 检测状态变化
+                current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
+                if current_speaking != _last_speaking:
+                    logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
+                    _transition_start = time.time()
+                _last_speaking = current_speaking
+
+                if audio_frames[0].type!=0 and audio_frames[1].type!=0: #全为静音数据，只需要取fullimg
+                    self.speaking = False
+                    audiotype = audio_frames[0].type
+                    paste_stage_start = time.perf_counter()
+                    if self.custom_index.get(audiotype) is not None: #有自定义视频
+                        mirindex = mirror_index(len(self.custom_img_cycle[audiotype]),self.custom_index[audiotype])
+                        target_frame = self.custom_img_cycle[audiotype][mirindex]
+                        self.custom_index[audiotype] += 1
+                    else:
+                        target_frame = self.frame_list_cycle[idx]
+
+                    if enable_transition:
+                        # 说话→静音过渡
+                        if time.time() - _transition_start < _transition_duration and _last_speaking_frame is not None:
+                            alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
+                            combine_frame = cv2.addWeighted(_last_speaking_frame, 1-alpha, target_frame, alpha, 0)
+                        else:
+                            combine_frame = target_frame
+                        # 缓存静音帧
+                        _last_silent_frame = combine_frame.copy()
                     else:
                         combine_frame = target_frame
-                    # 缓存静音帧
-                    _last_silent_frame = combine_frame.copy()
+                    self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
                 else:
-                    combine_frame = target_frame
-                self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
-            else:
-                self.speaking = True
-                paste_stage_start = time.perf_counter()
-                try:
-                    current_frame = self.paste_back_frame(res_frame,idx)
-                except Exception as e:
-                    logger.warning(f"paste_back_frame error: {e}")
-                    continue
-                if enable_transition:
-                    # 静音→说话过渡
-                    if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
-                        alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
-                        combine_frame = cv2.addWeighted(_last_silent_frame, 1-alpha, current_frame, alpha, 0)
+                    self.speaking = True
+                    paste_stage_start = time.perf_counter()
+                    try:
+                        current_frame = self.paste_back_frame(res_frame,idx)
+                    except Exception as e:
+                        logger.warning(f"paste_back_frame error: {e}")
+                        continue
+                    if enable_transition:
+                        # 静音→说话过渡
+                        if time.time() - _transition_start < _transition_duration and _last_silent_frame is not None:
+                            alpha = min(1.0, (time.time() - _transition_start) / _transition_duration)
+                            combine_frame = cv2.addWeighted(_last_silent_frame, 1-alpha, current_frame, alpha, 0)
+                        else:
+                            combine_frame = current_frame
+                        # 缓存说话帧
+                        _last_speaking_frame = combine_frame.copy()
                     else:
                         combine_frame = current_frame
-                    # 缓存说话帧
-                    _last_speaking_frame = combine_frame.copy()
-                else:
-                    combine_frame = current_frame
-                self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
+                    self._perf['process_paste_sec'] += (time.perf_counter() - paste_stage_start)
 
-            try:
                 if self._watermark_enabled and self._watermark_text:
                     self._apply_watermark(combine_frame)
-            
-            # 使用统一输出接口推送视频帧
+
+                # 使用统一输出接口推送视频帧
                 now = time.perf_counter()
                 if next_video_ts > now:
                     time.sleep(next_video_ts - now)
@@ -512,8 +506,10 @@ class BaseAvatar:
                 self._perf['process_frames'] += 1
                 self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
                 self._maybe_log_pipeline_stats()
+            except queue.Empty:
+                continue
             except Exception:
-                logger.exception('process_frames send/render failed')
+                logger.exception('process_frames iteration failed')
                 continue
                 
             # if self.opt.transport == 'virtualcam' and hasattr(self.output, '_cam') and self.output._cam:

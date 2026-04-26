@@ -49,6 +49,8 @@ def load_model(path):
     model.load_state_dict(new_s)
 
     model = model.to(device)
+    if device == 'cuda':
+        model = model.half()
     return model.eval()
 
 def load_avatar(avatar_id):
@@ -65,10 +67,12 @@ def load_avatar(avatar_id):
 
 @torch.no_grad()
 def warm_up(batch_size,model,modelres):
+    model_dtype = next(model.parameters()).dtype
+
     def build_inputs():
         return (
-            torch.ones(batch_size, 1, 80, 16).to(device),
-            torch.ones(batch_size, 6, modelres, modelres).to(device),
+            torch.ones(batch_size, 1, 80, 16, device=device, dtype=model_dtype),
+            torch.ones(batch_size, 6, modelres, modelres, device=device, dtype=model_dtype),
         )
 
     warm_up_avatar_model(build_inputs, model)
@@ -85,6 +89,7 @@ class LipReal(BaseAvatar):
         # self.idx = 0
         # self.res_frame_queue = Queue(self.batch_size*2)
         self.model = model
+        self._model_dtype = next(self.model.parameters()).dtype
         self._compose_buf = None
 
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
@@ -107,8 +112,8 @@ class LipReal(BaseAvatar):
         img_batch = np.concatenate((img_masked, img_batch), axis=3) / 255.
         audiofeat_batch = np.reshape(audiofeat_batch, [len(audiofeat_batch), audiofeat_batch.shape[1], audiofeat_batch.shape[2], 1])
         
-        img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-        audiofeat_batch = torch.FloatTensor(np.transpose(audiofeat_batch, (0, 3, 1, 2))).to(device)
+        img_batch = torch.from_numpy(np.transpose(img_batch, (0, 3, 1, 2))).to(device=device, dtype=self._model_dtype, non_blocking=True)
+        audiofeat_batch = torch.from_numpy(np.transpose(audiofeat_batch, (0, 3, 1, 2))).to(device=device, dtype=self._model_dtype, non_blocking=True)
 
         with torch.no_grad():
             pred = self.model(audiofeat_batch, img_batch)

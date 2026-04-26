@@ -241,6 +241,26 @@ class HumanPlayer:
         self._stats['audio_dropped'] += dropped
         self._maybe_log_stats()
 
+    def get_fallback_packet(self, kind: str):
+        """Compatibility helper for diagnostics and legacy tests."""
+        if kind == 'audio':
+            samples = int(SAMPLE_RATE * AUDIO_PTIME)
+            frame = AudioFrame(format='s16', layout='mono', samples=samples)
+            frame.sample_rate = SAMPLE_RATE
+            frame.planes[0].update(np.zeros(samples, dtype=np.int16).tobytes())
+            return frame, None
+
+        if kind == 'video':
+            from av import VideoFrame
+            if self._last_video_frame is not None:
+                return VideoFrame.from_ndarray(self._last_video_frame, format='bgr24'), None
+            if self._video_shape is not None:
+                black = np.zeros(self._video_shape, dtype=np.uint8)
+                return VideoFrame.from_ndarray(black, format='bgr24'), None
+            return None
+
+        return None
+
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()
 

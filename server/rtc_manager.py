@@ -38,12 +38,29 @@ class RTCManager:
         """
         self.opt = opt
         self.pcs: set = set()
+        self._pc_sessions: Dict[RTCPeerConnection, str] = {}
+
+    def _release_session_for_pc(self, pc: RTCPeerConnection) -> None:
+        sessionid = self._pc_sessions.pop(pc, None)
+        if sessionid:
+            session_manager.remove_session(sessionid)
 
     async def handle_offer(self, request):
         """处理 WebRTC offer 信令"""
         offer_start = time.perf_counter()
+        pc: Optional[RTCPeerConnection] = None
+        sessionid: Optional[str] = None
         params = await request.json()
-        offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+        offer_sdp = params.get("sdp")
+        offer_type = params.get("type")
+        if not isinstance(offer_sdp, str) or not offer_sdp.strip() or not isinstance(offer_type, str):
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "invalid offer payload"}),
+            )
+
+        offer = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
 
         if False: # 不再由 RTCManager 控制 max_session，让业务逻辑或SessionManager 控制
             logger.info('reach max session')
@@ -54,93 +71,132 @@ class RTCManager:
 
         #sessionid = _rand_session_id()
 
-        # 通过 SessionManager 构建
-        sessionid = await session_manager.create_session(params)
-        logger.info('offer sessionid=%s', sessionid)
-        avatar_session = session_manager.get_session(sessionid)
+        try:
+            # 通过 SessionManager 构建
+            sessionid = await session_manager.create_session(params)
+            logger.info('offer sessionid=%s', sessionid)
+            avatar_session = session_manager.get_session(sessionid)
+            if avatar_session is None:
+                raise RuntimeError(f'session build failed: {sessionid}')
 
-        # 创建 PeerConnection
-        ice_urls = [u.strip() for u in str(getattr(self.opt, 'ice_server_urls', '')).split(',') if u.strip()]
-        if ice_urls:
-            ice_servers = [RTCIceServer(urls=u) for u in ice_urls]
-            pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
-            logger.info('offer using ICE servers: %s', ice_urls)
-        else:
-            pc = RTCPeerConnection()
-            logger.info('offer using no ICE server (LAN/local mode)')
-        self.pcs.add(pc)
+            # 创建 PeerConnection
+            ice_urls = [u.strip() for u in str(getattr(self.opt, 'ice_server_urls', '')).split(',') if u.strip()]
+            if ice_urls:
+                ice_servers = [RTCIceServer(urls=u) for u in ice_urls]
+                pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
+                logger.info('offer using ICE servers: %s', ice_urls)
+            else:
+                pc = RTCPeerConnection()
+                logger.info('offer using no ICE server (LAN/local mode)')
+            self.pcs.add(pc)
+            self._pc_sessions[pc] = sessionid
 
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange():
-            logger.info("Connection state is %s", pc.connectionState)
-            if pc.connectionState in ("failed", "closed"):
-                await pc.close()
+            @pc.on("connectionstatechange")
+            async def on_connectionstatechange():
+                logger.info("Connection state is %s", pc.connectionState)
+                if pc.connectionState in ("failed", "closed", "disconnected"):
+                    await pc.close()
+                    self.pcs.discard(pc)
+                    self._release_session_for_pc(pc)
+
+            # 添加发送轨道
+            from server.webrtc import HumanPlayer
+            player = HumanPlayer(avatar_session)
+            pc.addTrack(player.audio)
+            pc.addTrack(player.video)
+
+            # 设置编解码器偏好
+            capabilities = RTCRtpSender.getCapabilities("video")
+            preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
+            preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
+            preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
+            video_transceiver = next((t for t in pc.getTransceivers() if getattr(t, 'kind', '') == 'video'), None)
+            if video_transceiver is not None and preferences:
+                video_transceiver.setCodecPreferences(preferences)
+
+            await pc.setRemoteDescription(offer)
+
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            logger.info('offer done sessionid=%s elapsed=%.3fs', sessionid, time.perf_counter() - offer_start)
+
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({
+                    "sdp": pc.localDescription.sdp,
+                    "type": pc.localDescription.type,
+                    "sessionid": sessionid,
+                }),
+            )
+        except Exception as e:
+            logger.exception('handle_offer failed')
+            if pc is not None:
+                try:
+                    await pc.close()
+                except Exception:
+                    logger.exception('pc close failed during offer rollback')
                 self.pcs.discard(pc)
+                self._release_session_for_pc(pc)
+            elif sessionid:
                 session_manager.remove_session(sessionid)
-
-        # 添加发送轨道
-        from server.webrtc import HumanPlayer
-        player = HumanPlayer(avatar_session)
-        pc.addTrack(player.audio)
-        pc.addTrack(player.video)
-
-        # 设置编解码器偏好
-        capabilities = RTCRtpSender.getCapabilities("video")
-        preferences = list(filter(lambda x: x.name == "H264", capabilities.codecs))
-        preferences += list(filter(lambda x: x.name == "VP8", capabilities.codecs))
-        preferences += list(filter(lambda x: x.name == "rtx", capabilities.codecs))
-        transceiver = pc.getTransceivers()[1]
-        transceiver.setCodecPreferences(preferences)
-
-        await pc.setRemoteDescription(offer)
-
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        logger.info('offer done sessionid=%s elapsed=%.3fs', sessionid, time.perf_counter() - offer_start)
-
-        return web.Response(
-            content_type="application/json",
-            text=json.dumps({
-                "sdp": pc.localDescription.sdp,
-                "type": pc.localDescription.type,
-                "sessionid": sessionid,
-            }),
-        )
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": f"offer failed: {e}"}),
+            )
 
     async def handle_rtcpush(self, push_url, sessionid: str):
         """RTCPush 模式：主动推流"""
         import aiohttp
-        await session_manager.create_session({}, sessionid)
-        avatar_session = session_manager.get_session(sessionid)
+        pc: Optional[RTCPeerConnection] = None
+        try:
+            await session_manager.create_session({}, sessionid)
+            avatar_session = session_manager.get_session(sessionid)
+            if avatar_session is None:
+                raise RuntimeError(f'session build failed: {sessionid}')
 
-        pc = RTCPeerConnection()
-        self.pcs.add(pc)
+            pc = RTCPeerConnection()
+            self.pcs.add(pc)
+            self._pc_sessions[pc] = sessionid
 
-        @pc.on("connectionstatechange")
-        async def on_connectionstatechange():
-            logger.info("Connection state is %s", pc.connectionState)
-            if pc.connectionState == "failed":
-                await pc.close()
+            @pc.on("connectionstatechange")
+            async def on_connectionstatechange():
+                logger.info("Connection state is %s", pc.connectionState)
+                if pc.connectionState in ("failed", "closed", "disconnected"):
+                    await pc.close()
+                    self.pcs.discard(pc)
+                    self._release_session_for_pc(pc)
+
+            from server.webrtc import HumanPlayer
+            player = HumanPlayer(avatar_session)
+            pc.addTrack(player.audio)
+            pc.addTrack(player.video)
+
+            await pc.setLocalDescription(await pc.createOffer())
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(push_url, data=pc.localDescription.sdp) as response:
+                    answer_sdp = await response.text()
+
+            await pc.setRemoteDescription(
+                RTCSessionDescription(sdp=answer_sdp, type='answer')
+            )
+        except Exception:
+            logger.exception('handle_rtcpush failed sessionid=%s', sessionid)
+            if pc is not None:
+                try:
+                    await pc.close()
+                except Exception:
+                    logger.exception('pc close failed during rtcpush rollback')
                 self.pcs.discard(pc)
+                self._release_session_for_pc(pc)
+            else:
                 session_manager.remove_session(sessionid)
-
-        from server.webrtc import HumanPlayer
-        player = HumanPlayer(avatar_session)
-        pc.addTrack(player.audio)
-        pc.addTrack(player.video)
-
-        await pc.setLocalDescription(await pc.createOffer())
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(push_url, data=pc.localDescription.sdp) as response:
-                answer_sdp = await response.text()
-
-        await pc.setRemoteDescription(
-            RTCSessionDescription(sdp=answer_sdp, type='answer')
-        )
+            raise
 
     async def shutdown(self):
         """关闭所有 PeerConnection"""
         coros = [pc.close() for pc in self.pcs]
         await asyncio.gather(*coros)
+        for pc in list(self._pc_sessions.keys()):
+            self._release_session_for_pc(pc)
         self.pcs.clear()
