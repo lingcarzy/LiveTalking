@@ -433,6 +433,18 @@ class BaseAvatar:
             
             # 检测状态变化
             current_speaking = not (audio_frames[0].type!=0 and audio_frames[1].type!=0)
+            force_end = False
+            for af in audio_frames:
+                userdata = af.userdata if isinstance(af.userdata, dict) else None
+                if userdata and userdata.get('status') == 'end':
+                    force_end = True
+                    break
+
+            if force_end:
+                # Drop queued talking frames on explicit end event to keep A/V tail aligned.
+                self._drain_queue_keep_latest(self.res_frame_queue, keep=1)
+                current_speaking = False
+
             if current_speaking != _last_speaking:
                 logger.info(f"状态切换：{'说话' if _last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
                 _transition_start = time.time()
@@ -503,6 +515,19 @@ class BaseAvatar:
 
         self.output.stop()
         logger.info('baseavatar process_frames thread stop') 
+
+    @staticmethod
+    def _drain_queue_keep_latest(q: Queue, keep: int = 0) -> int:
+        """Drop old queued items while optionally keeping the newest N items."""
+        dropped = 0
+        target = max(0, int(keep))
+        while q.qsize() > target:
+            try:
+                q.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        return dropped
 
     def _maybe_log_pipeline_stats(self):
         now = time.perf_counter()
