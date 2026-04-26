@@ -506,20 +506,37 @@ class BaseAvatar:
         logger.info('baseavatar process_frames thread stop') 
 
     def process_audio(self, quit_event):
+        chunk_duration = self.chunk / float(self.sample_rate)
+        next_send_ts = time.perf_counter()
         while not quit_event.is_set():
             try:
                 audio_frame: AudioFrameData = self.asr.get_play_audio_out(block=True, timeout=1)
             except queue.Empty:
+                next_send_ts = time.perf_counter()
                 continue
 
             if audio_frame.userdata.get('_skip_playback'):
                 continue
+
+            status = audio_frame.userdata.get('status') if audio_frame.userdata else None
+            if status == 'start':
+                next_send_ts = time.perf_counter()
+            elif status == 'end':
+                next_send_ts = time.perf_counter()
+
+            now = time.perf_counter()
+            if next_send_ts > now:
+                time.sleep(next_send_ts - now)
+            elif now - next_send_ts > 0.2:
+                # If schedule drifts too far, resync clock to avoid burst sending.
+                next_send_ts = now
 
             frame = (audio_frame.data * 32767).astype(np.int16)
             self.output.push_audio_frame(frame, audio_frame.userdata)
             self.record_audio_data(frame)
             self._perf['process_audio_chunks'] += 1
             self._maybe_log_pipeline_stats()
+            next_send_ts += chunk_duration
 
         logger.info('baseavatar process_audio thread stop')
 
