@@ -309,6 +309,14 @@ def main():
     # 解析命令行参数
     from config import parse_args
     opt = parse_args()
+    logger.info(
+        'runtime tuning: batch_size=%d asr_feat_queue_size=%d fps=%d transport=%s encoder=%s',
+        int(getattr(opt, 'batch_size', 0)),
+        int(getattr(opt, 'asr_feat_queue_size', 0)),
+        int(getattr(opt, 'fps', 0)),
+        str(getattr(opt, 'transport', '')),
+        str(getattr(opt, 'webrtc_video_encoder', '')),
+    )
     configure_webrtc_h264_encoder(opt)
     run_webrtc_encoder_selfcheck(opt)
 

@@ -68,7 +68,7 @@ def parse_args():
                         help="avatar model: musetalk/wav2lip/ultralight")
     parser.add_argument('--avatar_id', type=str, default='wav2lip256_avatar1',
                         help="avatar id in data/avatars")
-    parser.add_argument('--batch_size', type=int, default=16, help="infer batch")
+    parser.add_argument('--batch_size', type=int, default=4, help="infer batch")
     parser.add_argument('--modelres', type=int, default=192)
     parser.add_argument('--modelfile', type=str, default='')
 
@@ -141,7 +141,7 @@ def parse_args():
                         default=os.getenv('WATERMARK_TEXT', 'LiveTalking'),
                         help="watermark text, empty disables drawing")
     parser.add_argument('--asr_feat_queue_size', type=int,
-                        default=int(os.getenv('ASR_FEAT_QUEUE_SIZE', '0')),
+                        default=int(os.getenv('ASR_FEAT_QUEUE_SIZE', '4')),
                         help="ASR feature queue size; <=0 uses adaptive default")
     parser.add_argument('--render_backpressure_threshold', type=int,
                         default=int(os.getenv('RENDER_BACKPRESSURE_THRESHOLD', '8')),

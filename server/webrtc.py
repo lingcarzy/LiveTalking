@@ -65,13 +65,16 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.totaltime = 0
         self.recv_wait_total = 0.0
         self.recv_wait_count = 0
+        self._timestamp = 0
+        self._start = time.time()
     
     _start: float
     _timestamp: int
 
     async def next_timestamp(self) -> Tuple[int, fractions.Fraction]:
+        # Be tolerant to transient track state glitches; avoid killing video track permanently.
         if self.readyState != "live":
-            raise Exception
+            mylogger.warning("track %s readyState=%s, continue timestamping", self.kind, self.readyState)
 
         if self.kind == 'video':
             if hasattr(self, "_timestamp"):
@@ -114,7 +117,11 @@ class PlayerStreamTrack(MediaStreamTrack):
     async def recv(self) -> Union[Frame, Packet]:
         self._player._start(self)
         qwait_start = time.perf_counter()
-        frame, eventpoint = await asyncio.to_thread(self._queue.get)
+        try:
+            frame, eventpoint = await asyncio.to_thread(self._queue.get)
+        except Exception as e:
+            mylogger.exception("track %s recv queue.get failed: %s", self.kind, e)
+            raise
         qwait = time.perf_counter() - qwait_start
 
         self.recv_wait_total += qwait
@@ -122,12 +129,17 @@ class PlayerStreamTrack(MediaStreamTrack):
         if self._player is not None:
             self._player._on_track_recv(self.kind, qwait)
                 
-        pts, time_base = await self.next_timestamp()
+        try:
+            pts, time_base = await self.next_timestamp()
+        except Exception as e:
+            mylogger.exception("track %s next_timestamp failed: %s", self.kind, e)
+            raise
         frame.pts = pts
         frame.time_base = time_base
         if eventpoint and self._player is not None:
             self._player.notify(eventpoint)
         if frame is None:
+            mylogger.error("track %s got None frame, stopping", self.kind)
             self.stop()
             raise Exception
         if self.kind == 'video':
