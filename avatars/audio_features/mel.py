@@ -32,6 +32,7 @@ from avatars.wav2lip import audio
 class MelASR(BaseASR):
 
     def run_step(self):
+        step_start = time.perf_counter()
         ############################################## extract audio feature ##############################################
         # get a frame of audio
         for _ in range(self.batch_size*2):
@@ -41,6 +42,7 @@ class MelASR(BaseASR):
             self.publish_audio_frame(audioframe)
         # context not enough, do not run network.
         if len(self.frames) <= self.stride_left_size + self.stride_right_size:
+            self.report_feature_stats(step_sec=time.perf_counter() - step_start)
             return
         
         inputs = np.concatenate(self.frames) # [N * chunk]
@@ -62,6 +64,11 @@ class MelASR(BaseASR):
                 mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
             i += 1
         self._put_with_drop_oldest(self.feat_queue, mel_chunks)
+        self.report_feature_stats(
+            step_sec=time.perf_counter() - step_start,
+            feat_batches=1,
+            feat_chunks=len(mel_chunks),
+        )
         
         # discard the old part to save memory
         self.frames = self.frames[-(self.stride_left_size + self.stride_right_size):]

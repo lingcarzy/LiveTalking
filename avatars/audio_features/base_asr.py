@@ -113,6 +113,15 @@ class BaseASR:
     def publish_audio_frame(self, audio_frame: AudioFrameData) -> None:
         self._put_with_drop_oldest(self.output_queue, audio_frame)
         self._put_with_drop_oldest(self.play_queue, audio_frame)
+
+    def report_feature_stats(self, *, step_sec: float, feat_batches: int = 0, feat_chunks: int = 0) -> None:
+        if not self.parent or not hasattr(self.parent, '_perf'):
+            return
+        perf = self.parent._perf
+        perf['asr_steps'] += 1
+        perf['asr_step_sec'] += step_sec
+        perf['asr_feat_batches'] += feat_batches
+        perf['asr_feat_chunks'] += feat_chunks
     
     def warm_up(self):
         for _ in range(self.stride_left_size + self.stride_right_size):
