@@ -298,7 +298,7 @@ class HumanPlayer:
 
     def _start(self, track: PlayerStreamTrack) -> None:
         self.__started.add(track)
-        if self.__thread is None and len(self.__started) >= 2:
+        if self.__thread is None:
             self.__log_debug("Starting worker thread")
             self.__thread_quit = threading.Event()
             self.__thread = threading.Thread(
