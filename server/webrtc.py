@@ -65,11 +65,11 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.totaltime = 0
         self.recv_wait_total = 0.0
         self.recv_wait_count = 0
-        self._timestamp = 0
-        self._start = time.time()
+        self._timestamp = None
+        self._start = None
     
-    _start: float
-    _timestamp: int
+    _start: Optional[float]
+    _timestamp: Optional[int]
 
     async def next_timestamp(self) -> Tuple[int, fractions.Fraction]:
         # Be tolerant to transient track state glitches; avoid killing video track permanently.
@@ -77,38 +77,27 @@ class PlayerStreamTrack(MediaStreamTrack):
             mylogger.warning("track %s readyState=%s, continue timestamping", self.kind, self.readyState)
 
         if self.kind == 'video':
-            if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * VIDEO_CLOCK_RATE
+            if self._timestamp is not None and self._start is not None:
                 self._timestamp += int(VIDEO_PTIME * VIDEO_CLOCK_RATE)
                 self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.time()
-                # wait = self.timelist[0] + len(self.timelist)*VIDEO_PTIME - time.time()               
+                wait = self._start + self.current_frame_count * VIDEO_PTIME - time.perf_counter()
                 if wait>0:
                     await asyncio.sleep(wait)
-                # if len(self.timelist)>=100:
-                #     self.timelist.pop(0)
-                # self.timelist.append(time.time())
             else:
-                self._start = time.time()
+                self._start = time.perf_counter()
                 self._timestamp = 0
                 self.timelist.append(self._start)
                 mylogger.info('video start:%f',self._start)
             return self._timestamp, VIDEO_TIME_BASE
         else: #audio
-            if hasattr(self, "_timestamp"):
-                #self._timestamp = (time.time()-self._start) * SAMPLE_RATE
+            if self._timestamp is not None and self._start is not None:
                 self._timestamp += int(AUDIO_PTIME * SAMPLE_RATE)
                 self.current_frame_count += 1
-                wait = self._start + self.current_frame_count * AUDIO_PTIME - time.time()
-                # wait = self.timelist[0] + len(self.timelist)*AUDIO_PTIME - time.time()
+                wait = self._start + self.current_frame_count * AUDIO_PTIME - time.perf_counter()
                 if wait>0:
                     await asyncio.sleep(wait)
-                # if len(self.timelist)>=200:
-                #     self.timelist.pop(0)
-                #     self.timelist.pop(0)
-                # self.timelist.append(time.time())
             else:
-                self._start = time.time()
+                self._start = time.perf_counter()
                 self._timestamp = 0
                 self.timelist.append(self._start)
                 mylogger.info('audio start:%f',self._start)
