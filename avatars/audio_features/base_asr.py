@@ -34,7 +34,6 @@ class BaseASR:
         self.fps = opt.fps # 20 ms per frame
         self.sample_rate = 16000
         self.chunk = self.sample_rate // (opt.fps*2) # 320 samples per chunk (20ms * 16000 / 1000)
-        self.chunk_duration = self.chunk / float(self.sample_rate)
         self.queue:Queue[AudioFrameData] = Queue(maxsize=max(8, opt.batch_size * 8))
         self.output_queue:Queue[AudioFrameData] = Queue(maxsize=max(16, opt.batch_size * 12))
 
@@ -84,7 +83,7 @@ class BaseASR:
                 type = self.parent.custom_audiotype
                 return AudioFrameData(data=frame, type=type, userdata={})
             else:
-                frame = self.queue.get(block=True,timeout=self.chunk_duration)
+                frame = self.queue.get(block=True,timeout=0.05)
                 return frame
             #print(f'[INFO] get frame {frame.shape}')
         except queue.Empty:
