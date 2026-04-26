@@ -40,7 +40,8 @@ class BaseASR:
 
         self.batch_size = opt.batch_size
         self._streaming_audio_active = False
-        self._streaming_timeout_sec = 0.25
+        # Keep active-stream timeout close to one audio chunk to avoid starving playback.
+        self._streaming_timeout_sec = max(0.02, min(0.05, self.chunk / float(self.sample_rate)))
 
         self.frames: list[NDArray[np.float32]] = []
         self.stride_left_size = opt.l
