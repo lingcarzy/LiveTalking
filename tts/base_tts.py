@@ -3,6 +3,7 @@ import queue
 from queue import Queue
 from io import BytesIO
 from enum import Enum
+import asyncio
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ class BaseTTS:
 
         self.msgqueue = Queue(maxsize=max(32, getattr(opt, 'batch_size', 16) * 8))
         self.state = State.RUNNING
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def flush_talk(self):
         while True:
@@ -60,7 +62,24 @@ class BaseTTS:
                 continue
             self.txt_to_audio(msg)
         self.stop_tts()
+        self._close_event_loop()
         logger.info('ttsreal thread stop')
+
+    def _ensure_event_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+        return self._loop
+
+    def run_async(self, coro):
+        loop = self._ensure_event_loop()
+        return loop.run_until_complete(coro)
+
+    def _close_event_loop(self):
+        if self._loop is None:
+            return
+        if not self._loop.is_closed():
+            self._loop.close()
+        self._loop = None
     
     def txt_to_audio(self, msg: tuple[str, dict]):
         pass

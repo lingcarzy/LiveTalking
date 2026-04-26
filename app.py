@@ -142,6 +142,9 @@ def configure_webrtc_h264_encoder(opt) -> None:
 
     warned_fallback = {'done': False}
     preset = getattr(opt, 'webrtc_nvenc_preset', 'p4')
+    target_fps = int(getattr(opt, 'fps', 25) or 25)
+    if target_fps <= 0:
+        target_fps = 25
 
     def _create_nvenc_codec(width: int, height: int, bitrate: int):
         codec = av.CodecContext.create('h264_nvenc', 'w')
@@ -149,8 +152,8 @@ def configure_webrtc_h264_encoder(opt) -> None:
         codec.height = int(height)
         codec.bit_rate = int(bitrate)
         codec.pix_fmt = 'yuv420p'
-        codec.framerate = fractions.Fraction(30, 1)
-        codec.time_base = fractions.Fraction(1, 30)
+        codec.framerate = fractions.Fraction(target_fps, 1)
+        codec.time_base = fractions.Fraction(1, target_fps)
         codec.options = {
             'preset': preset,
             'tune': 'll',
@@ -166,6 +169,12 @@ def configure_webrtc_h264_encoder(opt) -> None:
         original_encode_frame = encoder_cls._encode_frame
 
         def _patched_encode_frame(self, frame, force_keyframe):
+            # NVENC H264 expects yuv420p; ensure even dimensions for chroma subsampling.
+            aligned_width = max(2, int(frame.width) & ~1)
+            aligned_height = max(2, int(frame.height) & ~1)
+            if frame.format.name != 'yuv420p' or aligned_width != frame.width or aligned_height != frame.height:
+                frame = frame.reformat(width=aligned_width, height=aligned_height, format='yuv420p')
+
             if self.codec and (
                 frame.width != self.codec.width
                 or frame.height != self.codec.height

@@ -134,6 +134,21 @@ def parse_args():
     parser.add_argument('--skip_model_warmup', type=str_to_bool,
                         default=False,
                         help="deprecated, ignored: model warmup is always enabled")
+    parser.add_argument('--watermark_enable', type=str_to_bool,
+                        default=str_to_bool(os.getenv('WATERMARK_ENABLE', '1')),
+                        help="deprecated: use watermark_text; false maps to empty watermark text")
+    parser.add_argument('--watermark_text', type=str,
+                        default=os.getenv('WATERMARK_TEXT', 'LiveTalking'),
+                        help="watermark text, empty disables drawing")
+    parser.add_argument('--asr_feat_queue_size', type=int,
+                        default=int(os.getenv('ASR_FEAT_QUEUE_SIZE', '0')),
+                        help="ASR feature queue size; <=0 uses adaptive default")
+    parser.add_argument('--render_backpressure_threshold', type=int,
+                        default=int(os.getenv('RENDER_BACKPRESSURE_THRESHOLD', '8')),
+                        help="render backpressure threshold for queue sizes")
+    parser.add_argument('--render_backpressure_streak', type=int,
+                        default=int(os.getenv('RENDER_BACKPRESSURE_STREAK', '3')),
+                        help="consecutive pressure windows before sleeping more")
 
     opt = parser.parse_args()
 
@@ -149,6 +164,18 @@ def parse_args():
         opt.max_audio_upload_mb = 1
     if opt.max_custom_config_chars < 100:
         opt.max_custom_config_chars = 100
+
+    if opt.asr_feat_queue_size <= 0:
+        opt.asr_feat_queue_size = max(4, opt.batch_size)
+
+    if opt.render_backpressure_threshold < 1:
+        opt.render_backpressure_threshold = 1
+    if opt.render_backpressure_streak < 1:
+        opt.render_backpressure_streak = 1
+
+    opt.watermark_text = str(getattr(opt, 'watermark_text', '') or '').strip()
+    if not bool(getattr(opt, 'watermark_enable', True)):
+        opt.watermark_text = ''
 
     opt.webrtc_video_encoder = str(opt.webrtc_video_encoder).strip().lower()
     if opt.webrtc_video_encoder in ('cpu', 'libx264'):

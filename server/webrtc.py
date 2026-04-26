@@ -62,6 +62,8 @@ class PlayerStreamTrack(MediaStreamTrack):
             self.framecount = 0
             self.lasttime = time.perf_counter()
             self.totaltime = 0
+        self.recv_wait_total = 0.0
+        self.recv_wait_count = 0
     
     _start: float
     _timestamp: int
@@ -126,7 +128,13 @@ class PlayerStreamTrack(MediaStreamTrack):
         #         else:
         #             frame = await self._queue.get()
         #     else:
+        qwait_start = time.perf_counter()
         frame, eventpoint = await asyncio.to_thread(self._queue.get)
+        qwait = time.perf_counter() - qwait_start
+        self.recv_wait_total += qwait
+        self.recv_wait_count += 1
+        if self._player is not None:
+            self._player._on_track_recv(self.kind, qwait)
                 
         pts, time_base = await self.next_timestamp()
         frame.pts = pts
@@ -182,30 +190,54 @@ class HumanPlayer:
         if hasattr(self.__container, 'output'):
             self.__container.output._player = self
 
+        self._stats = {
+            'video_pushed': 0,
+            'audio_pushed': 0,
+            'video_dropped': 0,
+            'audio_dropped': 0,
+            'video_recv': 0,
+            'audio_recv': 0,
+            'video_wait_total': 0.0,
+            'audio_wait_total': 0.0,
+        }
+        self._stats_last_time = time.perf_counter()
+        self._stats_last_video_pushed = 0
+        self._stats_last_video_recv = 0
+        self._stats_last_audio_pushed = 0
+        self._stats_last_audio_recv = 0
+
     @staticmethod
-    def _push_with_drop(q: queue.Queue, item) -> None:
+    def _push_with_drop(q: queue.Queue, item) -> int:
         """Keep real-time behavior by dropping oldest frame when the queue is full."""
+        dropped = 0
         while True:
             try:
                 q.put_nowait(item)
-                return
+                return dropped
             except queue.Full:
                 try:
                     q.get_nowait()
+                    dropped += 1
                 except queue.Empty:
-                    return
+                    return dropped
 
     def push_video(self, frame):
         from av import VideoFrame
         new_frame = VideoFrame.from_ndarray(frame, format="bgr24")
-        self._push_with_drop(self.__video._queue, (new_frame, None))
+        dropped = self._push_with_drop(self.__video._queue, (new_frame, None))
+        self._stats['video_pushed'] += 1
+        self._stats['video_dropped'] += dropped
+        self._maybe_log_stats()
 
     def push_audio(self, frame, eventpoint=None):
         from av import AudioFrame
         new_frame = AudioFrame(format='s16', layout='mono', samples=frame.shape[0])
         new_frame.planes[0].update(frame.tobytes())
         new_frame.sample_rate = 16000
-        self._push_with_drop(self.__audio._queue, (new_frame, eventpoint))
+        dropped = self._push_with_drop(self.__audio._queue, (new_frame, eventpoint))
+        self._stats['audio_pushed'] += 1
+        self._stats['audio_dropped'] += dropped
+        self._maybe_log_stats()
 
     def get_buffer_size(self) -> int:
         return self.__video._queue.qsize()
@@ -213,6 +245,52 @@ class HumanPlayer:
     def notify(self,eventpoint):
         if self.__container is not None:
             self.__container.notify(eventpoint)
+
+    def _on_track_recv(self, kind: str, wait_seconds: float) -> None:
+        if kind == 'video':
+            self._stats['video_recv'] += 1
+            self._stats['video_wait_total'] += wait_seconds
+        else:
+            self._stats['audio_recv'] += 1
+            self._stats['audio_wait_total'] += wait_seconds
+        self._maybe_log_stats()
+
+    def _maybe_log_stats(self) -> None:
+        now = time.perf_counter()
+        elapsed = now - self._stats_last_time
+        if elapsed < 5.0:
+            return
+
+        dv_push = self._stats['video_pushed'] - self._stats_last_video_pushed
+        dv_recv = self._stats['video_recv'] - self._stats_last_video_recv
+        da_push = self._stats['audio_pushed'] - self._stats_last_audio_pushed
+        da_recv = self._stats['audio_recv'] - self._stats_last_audio_recv
+        v_wait_avg_ms = 0.0
+        a_wait_avg_ms = 0.0
+        if self._stats['video_recv'] > 0:
+            v_wait_avg_ms = self._stats['video_wait_total'] * 1000.0 / self._stats['video_recv']
+        if self._stats['audio_recv'] > 0:
+            a_wait_avg_ms = self._stats['audio_wait_total'] * 1000.0 / self._stats['audio_recv']
+
+        mylogger.info(
+            'webrtc queue stats: vq=%d aq=%d v_push_fps=%.2f v_recv_fps=%.2f a_push=%.2f a_recv=%.2f v_drop=%d a_drop=%d v_wait=%.2fms a_wait=%.2fms',
+            self.__video._queue.qsize(),
+            self.__audio._queue.qsize(),
+            dv_push / elapsed,
+            dv_recv / elapsed,
+            da_push / elapsed,
+            da_recv / elapsed,
+            self._stats['video_dropped'],
+            self._stats['audio_dropped'],
+            v_wait_avg_ms,
+            a_wait_avg_ms,
+        )
+
+        self._stats_last_time = now
+        self._stats_last_video_pushed = self._stats['video_pushed']
+        self._stats_last_video_recv = self._stats['video_recv']
+        self._stats_last_audio_pushed = self._stats['audio_pushed']
+        self._stats_last_audio_recv = self._stats['audio_recv']
 
     @property
     def audio(self) -> MediaStreamTrack:
@@ -258,3 +336,10 @@ class HumanPlayer:
 
     def __log_debug(self, msg: str, *args) -> None:
         mylogger.debug(f"HumanPlayer {msg}", *args)
+
+    def get_debug_stats(self) -> dict:
+        return {
+            'video_queue': self.__video._queue.qsize(),
+            'audio_queue': self.__audio._queue.qsize(),
+            **self._stats,
+        }

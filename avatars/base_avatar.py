@@ -85,6 +85,23 @@ class BaseAvatar:
         self.batch_size = opt.batch_size
         self.res_frame_queue = Queue(self.batch_size*2)
         self.render_event = Event()
+        self._perf_window_start = time.perf_counter()
+        self._perf = {
+            'infer_batches': 0,
+            'infer_frames': 0,
+            'infer_busy_sec': 0.0,
+            'process_frames': 0,
+            'process_audio_chunks': 0,
+            'process_busy_sec': 0.0,
+        }
+        self._watermark_text = str(getattr(opt, 'watermark_text', 'LiveTalking') or '').strip()
+        self._watermark_enabled = bool(self._watermark_text)
+        self._render_backpressure_threshold = int(getattr(opt, 'render_backpressure_threshold', 8))
+        self._render_backpressure_streak_required = int(getattr(opt, 'render_backpressure_streak', 3))
+        self._render_last_res_q = 0
+        self._render_last_out_q = 0
+        self._render_pressure_streak = 0
+        self._watermark_cache = {}
 
         _tts_modules = {
             'edgetts': 'tts.edge',
@@ -374,6 +391,11 @@ class BaseAvatar:
                 for i, res_frame in enumerate(pred):
                     self.res_frame_queue.put((res_frame, audio_frames[i*2:i*2+2], mirror_index(length, index)))
                     index = index + 1
+
+            self._perf['infer_batches'] += 1
+            self._perf['infer_frames'] += self.batch_size
+            self._perf['infer_busy_sec'] += (time.perf_counter() - starttime)
+            self._maybe_log_pipeline_stats()
                     
             if current_speaking != last_speaking:
                 logger.info(f"inference 状态切换：{'说话' if last_speaking else '静音'} → {'说话' if current_speaking else '静音'}")
@@ -393,6 +415,7 @@ class BaseAvatar:
         self.output.start()
         
         while not quit_event.is_set():
+            frame_start = time.perf_counter()
             try:
                 audio_frames: list[AudioFrameData]
                 res_frame,audio_frames,idx = self.res_frame_queue.get(block=True, timeout=1)
@@ -446,7 +469,8 @@ class BaseAvatar:
                 else:
                     combine_frame = current_frame
 
-            cv2.putText(combine_frame, "LiveTalking", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (128,128,128), 1)
+            if self._watermark_enabled and self._watermark_text:
+                self._apply_watermark(combine_frame)
             
             # 使用统一输出接口推送视频帧
             self.output.push_video_frame(combine_frame)
@@ -459,12 +483,95 @@ class BaseAvatar:
                 # 使用统一输出接口推送音频帧
                 self.output.push_audio_frame(frame, audio_frame.userdata)
                 self.record_audio_data(frame)
+
+            self._perf['process_frames'] += 1
+            self._perf['process_audio_chunks'] += len(audio_frames)
+            self._perf['process_busy_sec'] += (time.perf_counter() - frame_start)
+            self._maybe_log_pipeline_stats()
                 
             # if self.opt.transport == 'virtualcam' and hasattr(self.output, '_cam') and self.output._cam:
             #     self.output._cam.sleep_until_next_frame()
 
         self.output.stop()
         logger.info('baseavatar process_frames thread stop') 
+
+    def _maybe_log_pipeline_stats(self):
+        now = time.perf_counter()
+        window = now - self._perf_window_start
+        if window < 5.0:
+            return
+
+        infer_fps = self._perf['infer_frames'] / max(1e-6, window)
+        process_fps = self._perf['process_frames'] / max(1e-6, window)
+        audio_chunk_rate = self._perf['process_audio_chunks'] / max(1e-6, window)
+        infer_busy_pct = (self._perf['infer_busy_sec'] / max(1e-6, window)) * 100.0
+        process_busy_pct = (self._perf['process_busy_sec'] / max(1e-6, window)) * 100.0
+
+        asr_q = self.asr.queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'queue') else -1
+        asr_out_q = self.asr.output_queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'output_queue') else -1
+        asr_feat_q = self.asr.feat_queue.qsize() if hasattr(self, 'asr') and hasattr(self.asr, 'feat_queue') else -1
+        res_q = self.res_frame_queue.qsize() if hasattr(self, 'res_frame_queue') else -1
+        out_buf = self.output.get_buffer_size() if hasattr(self, 'output') else -1
+
+        logger.info(
+            'pipeline stats: infer_fps=%.2f process_fps=%.2f audio_chunk_rate=%.2f infer_busy=%.1f%% process_busy=%.1f%% q_asr=%d q_asr_out=%d q_feat=%d q_res=%d out_buf=%d speaking=%s',
+            infer_fps,
+            process_fps,
+            audio_chunk_rate,
+            infer_busy_pct,
+            process_busy_pct,
+            asr_q,
+            asr_out_q,
+            asr_feat_q,
+            res_q,
+            out_buf,
+            self.speaking,
+        )
+
+        self._perf_window_start = now
+        self._perf['infer_batches'] = 0
+        self._perf['infer_frames'] = 0
+        self._perf['infer_busy_sec'] = 0.0
+        self._perf['process_frames'] = 0
+        self._perf['process_audio_chunks'] = 0
+        self._perf['process_busy_sec'] = 0.0
+
+    def _apply_watermark(self, frame: NDArray[np.uint8]) -> None:
+        h, w = frame.shape[:2]
+        key = (h, w, self._watermark_text)
+        cached = self._watermark_cache.get(key)
+        if cached is None:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.3
+            thickness = 1
+            (tw, th), baseline = cv2.getTextSize(self._watermark_text, font, font_scale, thickness)
+            patch_h = max(1, th + baseline + 2)
+            patch_w = max(1, tw + 2)
+            patch = np.zeros((patch_h, patch_w, 3), dtype=np.uint8)
+            cv2.putText(patch, self._watermark_text, (1, th + 1), font, font_scale, (128, 128, 128), thickness)
+            mask = np.any(patch != 0, axis=2)
+            cached = {
+                'patch': patch,
+                'mask': mask,
+                'text_h': th,
+            }
+            self._watermark_cache[key] = cached
+
+        x = 10
+        y_baseline = 20
+        patch = cached['patch']
+        mask = cached['mask']
+        top = max(0, y_baseline - cached['text_h'] - 1)
+        left = max(0, x)
+        bottom = min(h, top + patch.shape[0])
+        right = min(w, left + patch.shape[1])
+        if bottom <= top or right <= left:
+            return
+
+        patch_view = patch[: bottom - top, : right - left]
+        mask_view = mask[: bottom - top, : right - left]
+        roi = frame[top:bottom, left:right]
+        roi[mask_view] = patch_view[mask_view]
 
     def render(self,quit_event):
         self.quit_event = quit_event
@@ -483,13 +590,31 @@ class BaseAvatar:
         while not quit_event.is_set(): 
             self.asr.run_step()
 
-            buffer_size = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
-            if buffer_size >= 5:
-                logger.debug('sleep qsize=%d', buffer_size)
-                time.sleep(0.04 * buffer_size * 0.8)
+            res_q = self.res_frame_queue.qsize() if hasattr(self, 'res_frame_queue') else 0
+            out_q = self.output.get_buffer_size() if hasattr(self.output, 'get_buffer_size') else 0
+
+            # Trigger stronger backpressure only when queue growth is sustained.
+            if (
+                res_q >= self._render_backpressure_threshold
+                and out_q >= self._render_backpressure_threshold // 2
+                and res_q >= self._render_last_res_q
+                and out_q >= self._render_last_out_q
+            ):
+                self._render_pressure_streak += 1
             else:
-                # Yield CPU briefly to avoid busy-looping when workload is light.
-                time.sleep(0.001)
+                self._render_pressure_streak = 0
+
+            self._render_last_res_q = res_q
+            self._render_last_out_q = out_q
+
+            if self._render_pressure_streak >= self._render_backpressure_streak_required:
+                sleep_s = min(0.02, 0.0008 * (res_q + out_q))
+                logger.debug('adaptive sleep res_q=%d out_q=%d streak=%d sleep=%.4f', res_q, out_q, self._render_pressure_streak, sleep_s)
+                time.sleep(sleep_s)
+            elif res_q > 0 or out_q > 0:
+                time.sleep(0.0005)
+            else:
+                time.sleep(0.0002)
         logger.info('baseavatar render thread stop')
 
         infer_quit_event.set()

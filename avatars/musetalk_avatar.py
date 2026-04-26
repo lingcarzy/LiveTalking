@@ -22,7 +22,6 @@ import torch
 import numpy as np
 
 import cv2
-import copy
 
 from avatars.musetalk.myutil import get_image_blending
 from avatars.musetalk.utils.utils import load_all_model
@@ -100,6 +99,7 @@ class MuseReal(BaseAvatar):
         # self.res_frame_queue = mp.Queue(self.batch_size*2)
 
         self.vae, self.unet, self.pe, self.timesteps, self.audio_processor = model
+        self._compose_buf = None
 
         self.frame_list_cycle,self.mask_list_cycle,self.coord_list_cycle,self.mask_coords_list_cycle, self.input_latent_list_cycle = avatar
 
@@ -128,13 +128,16 @@ class MuseReal(BaseAvatar):
 
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
-        ori_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        source_frame = self.frame_list_cycle[idx]
+        if self._compose_buf is None or self._compose_buf.shape != source_frame.shape:
+            self._compose_buf = np.empty_like(source_frame)
+        np.copyto(self._compose_buf, source_frame)
         x1, y1, x2, y2 = bbox
 
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
         mask = self.mask_list_cycle[idx]
         mask_crop_box = self.mask_coords_list_cycle[idx]
 
-        combine_frame = get_image_blending(ori_frame,res_frame,bbox,mask,mask_crop_box)
+        combine_frame = get_image_blending(self._compose_buf,res_frame,bbox,mask,mask_crop_box)
         return combine_frame
             

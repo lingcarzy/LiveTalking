@@ -110,7 +110,7 @@ class DoubaoTTS(BaseTTS):
         text, textevent = msg
         ref_file = textevent.get('tts', {}).get('ref_file',self.opt.REF_FILE)
         #ref_text = textevent.get('tts', {}).get('ref_text')
-        asyncio.new_event_loop().run_until_complete(
+        self.run_async(
             self.stream_tts(
                 self.doubao_voice(text, ref_file),
                 msg

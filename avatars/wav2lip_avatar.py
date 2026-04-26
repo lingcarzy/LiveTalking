@@ -22,7 +22,6 @@ import torch
 import numpy as np
 
 import cv2
-import copy
 
 from avatars.audio_features.mel import MelASR
 from avatars.wav2lip.models import Wav2Lip
@@ -86,6 +85,7 @@ class LipReal(BaseAvatar):
         # self.idx = 0
         # self.res_frame_queue = Queue(self.batch_size*2)
         self.model = model
+        self._compose_buf = None
 
         self.frame_list_cycle,self.face_list_cycle,self.coord_list_cycle = avatar
 
@@ -117,9 +117,12 @@ class LipReal(BaseAvatar):
 
     def paste_back_frame(self,pred_frame,idx:int):
         bbox = self.coord_list_cycle[idx]
-        combine_frame = copy.deepcopy(self.frame_list_cycle[idx])
+        source_frame = self.frame_list_cycle[idx]
+        if self._compose_buf is None or self._compose_buf.shape != source_frame.shape:
+            self._compose_buf = np.empty_like(source_frame)
+        np.copyto(self._compose_buf, source_frame)
         y1, y2, x1, x2 = bbox
         res_frame = cv2.resize(pred_frame.astype(np.uint8),(x2-x1,y2-y1))
-        combine_frame[y1:y2, x1:x2] = res_frame
-        return combine_frame
+        self._compose_buf[y1:y2, x1:x2] = res_frame
+        return self._compose_buf
 
