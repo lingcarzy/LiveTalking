@@ -97,9 +97,16 @@ def _trim_history(history: list[dict], max_turns: int) -> None:
 
 
 def _pop_sentence(buffer: str):
+    # Keep TTS chunks stable: only split on strong sentence terminators.
+    # Splitting on commas creates many tiny utterances and causes audible jumps.
     for i, ch in enumerate(buffer):
-        if ch in ",.!;:，。！？：；\n" and i >= 5:
+        if ch in ".!?。！？；;\n" and i >= 8:
             return buffer[:i + 1].strip(), buffer[i + 1:]
+
+    # Safety valve for extremely long text without terminators.
+    if len(buffer) >= 80:
+        return buffer[:80].strip(), buffer[80:]
+
     return None, buffer
 
 
