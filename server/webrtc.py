@@ -55,7 +55,8 @@ class PlayerStreamTrack(MediaStreamTrack):
         super().__init__()  # don't forget this!
         self.kind = kind
         self._player = player
-        self._queue = queue.Queue(maxsize=100)
+        # Keep a bit more audio headroom than video to reduce early audio truncation.
+        self._queue = queue.Queue(maxsize=200 if kind == 'audio' else 100)
         self.timelist = [] #记录最近包的时间戳
         self.current_frame_count = 0
         if self.kind == 'video':
@@ -208,6 +209,17 @@ class HumanPlayer:
                 except queue.Empty:
                     return dropped
 
+    @staticmethod
+    def _drop_oldest(q: queue.Queue, count: int) -> int:
+        dropped = 0
+        for _ in range(max(0, count)):
+            try:
+                q.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                break
+        return dropped
+
     def push_video(self, frame):
         from av import VideoFrame
         self._video_shape = frame.shape
@@ -224,6 +236,11 @@ class HumanPlayer:
         new_frame.planes[0].update(frame.tobytes())
         new_frame.sample_rate = 16000
         dropped = self._push_with_drop(self.__audio._queue, (new_frame, eventpoint))
+        if dropped > 0:
+            # Audio is pushed at ~2x video cadence (20ms vs 40ms),
+            # so drop stale video packets proportionally to preserve A/V alignment.
+            video_to_drop = (dropped + 1) // 2
+            self._stats['video_dropped'] += self._drop_oldest(self.__video._queue, video_to_drop)
         self._stats['audio_pushed'] += 1
         self._stats['audio_dropped'] += dropped
         self._maybe_log_stats()
